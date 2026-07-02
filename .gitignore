@@ -1,0 +1,11 @@
+.venv/
+*.egg-info/
+__pycache__/
+*.pyc
+.DS_Store
+data/
+outputs/
+runs/
+*.pt
+*.mlpackage
+.claude/settings.local.json

@@ -1,0 +1,23 @@
+[project]
+name = "mvtrack"
+version = "0.1.0"
+description = "Compressed-domain video analytics: MV-propagated multi-object tracking on Apple Silicon"
+requires-python = ">=3.10"
+dependencies = [
+    "av>=12",
+    "numpy",
+    "opencv-python",
+    "torch>=2.2",
+    "ultralytics>=8.2",
+    "scipy",
+    "tqdm",
+    "pandas",
+    "matplotlib",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
