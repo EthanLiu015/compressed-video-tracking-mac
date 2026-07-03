@@ -1,45 +1,64 @@
-"""Lightweight appearance embedding for re-identification.
+"""Appearance embedding for re-identification, via a real ReID-trained model.
 
 Motion vectors alone are a structural ceiling: they carry no information
 about what something looks like, so IoU-based association can't
 distinguish two overlapping people or recover an identity across a gap
-too large for spatial overlap alone. This wraps a generic
-ImageNet-pretrained backbone (no time budget in this pass for training a
-person-ReID-specific model on MOT17 triplets) as a cosine-similarity
-appearance cost, used alongside IoU in MVTracker's association instead of
-IoU alone.
+too large for spatial overlap alone (see findings.md #9-12).
+
+A first pass used a generic ImageNet-pretrained classifier backbone
+(MobileNetV3) as a quick, no-training-required embedding -- findings.md
+#13 measured it as genuinely influencing ~26% of real assignment
+decisions but net-flat on tracking accuracy, and diagnosed why: a
+classifier backbone learns "this is a person" (category), not "this is
+*this* person" (identity), which is exactly what dedicated ReID
+metric-learning training exists to fix.
+
+This uses OSNet (Zhou et al., ICCV'19), pretrained by the original authors
+on MSMT17 (4101 identities, 15 cameras -- an actual person-ReID benchmark,
+not a classification dataset), sourced from a public checkpoint (no
+training on MOT17 at all -- zero overfitting risk to MOT17's small
+identity pool, unlike fine-tuning would carry). Verified directly: on real
+MOT17 crops, OSNet's same-identity vs. different-identity cosine
+similarity gap (0.511) is meaningfully larger than the generic backbone's
+(0.428) before this was wired into tracking at all.
 """
 
-import ssl
-
-import certifi
 import cv2
 import numpy as np
 import torch
-from torch import nn
-from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small
+import torch.nn.functional as F
+from huggingface_hub import hf_hub_download
+from torchreid.reid.models import build_model
 
-# macOS python.org installs lack system CA certs, breaking the first-time
-# pretrained-weights download via torch.hub (same root cause as the fix in
-# scripts/get_test_clip.py, applied globally here since torch.hub's
-# downloader doesn't take an explicit ssl context).
-ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=certifi.where())
-
-CROP_SIZE = (128, 64)  # (h, w), standard ReID aspect ratio
+CROP_SIZE = (256, 128)  # (h, w) -- OSNet's MSMT17 training resolution
+_MSMT17_NUM_CLASSES = 4101  # only used to build a matching classifier head, then discarded
+_HF_REPO = "kaiyangzhou/osnet"
+_HF_FILENAME = (
+    "osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_"
+    "lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
+)
+_IMAGENET_MEAN = (0.485, 0.456, 0.406)
+_IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 class ReIDEmbedder:
     def __init__(self, device: str = "cpu"):
         self.device = device
-        weights = MobileNet_V3_Small_Weights.IMAGENET1K_V1
-        backbone = mobilenet_v3_small(weights=weights)
-        self.model = nn.Sequential(backbone.features, nn.AdaptiveAvgPool2d(1)).to(device).eval()
-        tf = weights.transforms()
-        self.mean = torch.tensor(tf.mean, device=device).view(1, 3, 1, 1)
-        self.std = torch.tensor(tf.std, device=device).view(1, 3, 1, 1)
+        ckpt_path = hf_hub_download(repo_id=_HF_REPO, filename=_HF_FILENAME)
+        model = build_model("osnet_x0_25", num_classes=_MSMT17_NUM_CLASSES, pretrained=False)
+        state = torch.load(ckpt_path, map_location="cpu")
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        assert not missing and not unexpected, (
+            f"OSNet checkpoint didn't match the architecture exactly "
+            f"(missing={missing}, unexpected={unexpected}) -- likely a "
+            f"num_classes mismatch or a changed checkpoint filename."
+        )
+        self.model = model.to(device).eval()
+        self.mean = torch.tensor(_IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
+        self.std = torch.tensor(_IMAGENET_STD, device=device).view(1, 3, 1, 1)
         with torch.no_grad():
             dummy = torch.zeros(1, 3, *CROP_SIZE, device=device)
-            self.dim = self.model(dummy).squeeze(-1).squeeze(-1).shape[1]
+            self.dim = self.model(dummy).shape[1]
 
     def __call__(self, frame_bgr: np.ndarray, boxes_xyxy: np.ndarray) -> np.ndarray:
         """Returns L2-normalized embeddings [N, dim] for each box crop."""
@@ -59,6 +78,6 @@ class ReIDEmbedder:
         batch = batch.permute(0, 3, 1, 2).float() / 255.0
         batch = (batch - self.mean) / self.std
         with torch.no_grad():
-            feats = self.model(batch).squeeze(-1).squeeze(-1)
-            feats = torch.nn.functional.normalize(feats, dim=1)
+            feats = self.model(batch)
+            feats = F.normalize(feats, dim=1)
         return feats.cpu().numpy().astype(np.float32)

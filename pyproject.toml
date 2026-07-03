@@ -8,7 +8,10 @@ dependencies = [
     "numpy",
     "opencv-python",
     "torch>=2.2",
-    "torchvision",
+    "torchreid",
+    "huggingface_hub",
+    "gdown",  # transitive import inside torchreid's data module, unused directly
+    "tensorboard",  # transitive import inside torchreid's engine module, unused directly
     "ultralytics>=8.2",
     "scipy",
     "tqdm",

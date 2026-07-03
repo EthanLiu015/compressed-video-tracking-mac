@@ -26,6 +26,8 @@ honest negative results in `findings.md`; per-session narrative in
 | mv-fixed (anchor every 5th frame) | 35.7 | 26.4 | 42.5 | 38.5 |
 | mv-adaptive (residual-energy-proxy scheduler, tuned, ~15-17% anchor rate) | 35.4 | 25.4 | 42.7 | 44.2 |
 | mv-learned (mv-fixed + learned box correction) | 34.6 | 25.5 | 41.7 | 33.7 |
+| mv-fixed + `--use-reid` (OSNet/MSMT17 appearance) | 36.5 | 26.4 | 43.6 | 34.4 |
+| mv-adaptive + `--use-reid` | 35.6 | 25.6 | 43.1 | 38.9 |
 
 ![HOTA/MOTA vs throughput](results/plots/pipeline_pareto.png)
 
@@ -42,7 +44,16 @@ inversion and roughly halved mv-fixed's MOTA gap to baseline (findings.md
 #10). That fix also made anchors more valuable, so `Adaptive`'s untuned
 defaults were now anchoring too rarely — a 16-combination grid search
 against real MOTA (`scripts/tune_scheduler.py`, findings.md #11) restored
-mv-adaptive to matching mv-fixed's accuracy while staying faster.
+mv-adaptive to matching mv-fixed's accuracy while staying faster. Since
+motion vectors carry zero appearance information, also tried blending a
+learned embedding into association (`--use-reid`): a generic
+ImageNet-pretrained backbone measured flat (diagnosed cause: classifier
+features encode "a person," not "*this* person"), but swapping in OSNet
+(pretrained on MSMT17, an actual person-ReID benchmark, zero training on
+MOT17 so zero overfitting risk) gave a real HOTA/IDF1 gain on both
+pipelines at an ~11-12% fps cost (findings.md #13) — kept opt-in given
+the cost.
+
 mv-adaptive still roughly doubles baseline's max concurrent-stream
 capacity on the same chip at a fixed 25fps/stream quality bar (multi-stream
 and ablation numbers below were measured on YOLOv8n with the pre-fix

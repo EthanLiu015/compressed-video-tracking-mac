@@ -383,7 +383,7 @@ per-edge statistics or a way to detect when scale-change is actually
 happening (e.g. from box-size trend over recent anchors) before applying
 the correction selectively, rather than unconditionally on every box.
 
-## 13. Appearance-based re-identification — implemented, verified, near-zero real effect
+## 13. Appearance-based re-identification — generic backbone flat, real ReID model wins
 
 **What**: motion vectors carry zero information about what something looks
 like — a structural ceiling every fix so far had bumped into (findings.md
@@ -430,10 +430,45 @@ on same-vs-different-person pairs) exists to close, and exactly what this
 implementation doesn't have. Kept in the codebase as an opt-in
 (`--use-reid`, off by default, zero cost when unused) rather than reverted
 like #12, since it's a genuine working capability with a clearly
-diagnosed limitation, not a net-negative default. Swapping in a real
-pretrained person-ReID model (not something available as a drop-in
-dependency here) is the natural next step if this is revisited — the
-association/gating machinery already built should carry over unchanged.
+diagnosed limitation, not a net-negative default.
+
+**Update: swapped in a real pretrained person-ReID model, and it works.**
+The diagnosis pointed at the embedding source, not the association
+machinery — so rather than train anything on MOT17 (small identity pool,
+real overfitting risk), sourced OSNet (Zhou et al., ICCV'19), pretrained
+by its original authors on MSMT17 (4101 identities, 15 cameras — an actual
+ReID benchmark, not a classification dataset), hosted reliably on
+Hugging Face Hub (`kaiyangzhou/osnet`, downloaded via `huggingface_hub`,
+not the flaky Google Drive links torchreid's own model zoo uses). Zero
+training on MOT17 at all, so zero overfitting risk to it. Verified the
+checkpoint loads with 0 missing/0 unexpected keys against the `torchreid`
+package's architecture definition (confirms it's the right checkpoint for
+the right code, not a mismatched asset), and directly confirmed it's more
+discriminative than the generic backbone on real MOT17 crops before
+wiring it in: same-identity vs. different-identity cosine similarity gap
+of 0.511 vs. 0.428 for the ImageNet backbone.
+
+**Metric impact** (`ReIDEmbedder` swapped from ImageNet MobileNetV3 to
+OSNet x0.25/MSMT17, same association code, both pipelines' `--use-reid`):
+
+| Pipeline | HOTA (off→OSNet) | MOTA (off→OSNet) | IDF1 (off→OSNet) | mean fps (off→OSNet) |
+|---|---|---|---|---|
+| mv-fixed (interval=5) | 35.73→36.50 | 26.38→26.45 | 42.47→43.58 | 38.5→34.4 |
+| mv-adaptive (tuned) | 35.40→35.59 | 25.42→25.56 | 42.71→43.06 | 44.2→38.9 |
+
+**Read**: a real, non-noise-level win this time — HOTA +0.77/+0.19 and
+IDF1 +1.11/+0.35 across both pipelines (IDF1 specifically measures
+identity consistency, so it makes sense this is where a real ReID signal
+should show up most), at an ~11-12% fps cost from running the extra
+embedding network. MOTA barely moves, consistent with IDF1 being the
+metric this fix should affect most directly. This confirms the diagnosis
+from the first pass was correct: the mechanism (blending appearance into
+IoU-based association) was sound all along, and the earlier flat result
+was specifically about embedding quality, not the integration. Kept
+opt-in rather than made default, since the fps cost is real and the
+project's core throughput claim shouldn't quietly get more expensive by
+default — `--use-reid` is there for whoever wants the accuracy over the
+speed.
 
 ## Summary: what actually worked vs. didn't
 
@@ -463,17 +498,18 @@ association/gating machinery already built should carry over unchanged.
   measured flat-to-slightly-negative on real MOT17 (MOTA down in both
   mv-fixed and mv-adaptive) — reverted to the original rather than kept
   for a mixed-at-best result, the same discipline applied to CorrectionNet.
-- **Didn't move the needle, kept as opt-in rather than reverted**:
-  appearance-based re-identification (#13). Built, verified, and
-  integrated a full ImageNet-pretrained embedding pipeline into
-  `MVTracker`'s association — confirmed via direct measurement that it's
-  genuinely influencing ~26% of assignment decisions on the most crowded
-  sequence, not just sitting inert behind conservative gating, yet the net
-  effect on HOTA/MOTA/IDF1 is flat (within run-to-run noise) on both
-  mv-fixed and mv-adaptive. Diagnosed cause: generic ImageNet classifier
-  features encode "this is a person," not "this is *this* person" — the
-  exact gap dedicated ReID metric-learning training exists to close, and
-  exactly what a from-scratch pass without that training doesn't have.
-  Kept as a working, opt-in capability (off by default, zero cost when
-  unused) rather than reverted, since — unlike #12 — it isn't net-negative,
-  just not yet net-positive.
+- **Diagnosed flat, then fixed and confirmed real**: appearance-based
+  re-identification (#13). First pass (generic ImageNet-pretrained
+  embedding) measured flat on both pipelines despite genuinely
+  influencing ~26% of real assignment decisions — diagnosed cause: a
+  classifier backbone encodes "this is a person," not "this is *this*
+  person." Rather than train a fix on MOT17's small identity pool (real
+  overfitting risk), sourced OSNet pretrained on MSMT17 (an actual
+  ReID benchmark, 4101 identities) from Hugging Face Hub — zero training
+  on MOT17, zero overfitting risk. Verified the checkpoint loads exactly
+  (0 missing/unexpected keys) and is measurably more discriminative on
+  real MOT17 crops before wiring it in. Result: a real, non-noise HOTA/IDF1
+  gain on both pipelines (+0.77/+1.11 and +0.19/+0.35) at an ~11-12% fps
+  cost — kept opt-in given the cost, but this is the one lever in the
+  whole follow-on accuracy pass that was a clean, unambiguous win once the
+  right embedding source was used.

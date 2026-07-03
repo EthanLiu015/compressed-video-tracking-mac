@@ -202,23 +202,32 @@ confirmed the residual gap isn't a scheduling problem — MOTA is flat
 ~25-26% at interval 2, 3, and 5 alike.
 
 Also built appearance-based re-identification (`src/mvtrack/track/reid.py`,
-`MVTracker(use_appearance=True)`, CLI `--use-reid`) — a generic
-ImageNet-pretrained MobileNetV3-Small embedding blended into the
-association cost via cosine similarity. Verified via 4 synthetic
-scenarios and confirmed via direct measurement that it's genuinely
-influencing ~26% of real assignment decisions on the most crowded
-sequence (not inert behind conservative gating), but net effect on
-HOTA/MOTA/IDF1 is flat (within noise) on both mv-fixed and mv-adaptive —
-generic ImageNet features encode "this is a person," not "this is *this*
-person," which is what dedicated ReID metric-learning training exists to
-fix. Kept as an opt-in capability (off by default, zero cost unused)
-rather than reverted, unlike #12, since it isn't net-negative. See
-findings.md #13. Also hit and resolved a cosmetic gotcha: Apple's
-Accelerate BLAS (numpy's default backend on Apple Silicon) raises
-spurious divide-by-zero/overflow warnings on some embedding matmuls;
-verified output stays correct via a manual dot-product cross-check,
-suppressed the warning at the call site (`np.errstate`) rather than the
-underlying computation being wrong.
+`MVTracker(use_appearance=True)`, CLI `--use-reid`) — blends a cosine
+similarity embedding into the IoU association cost. First pass (generic
+ImageNet-pretrained MobileNetV3-Small) measured flat on HOTA/MOTA/IDF1
+despite genuinely influencing ~26% of real assignment decisions (verified
+directly, not just inert behind conservative gating) — diagnosed cause:
+a classifier backbone encodes "this is a person," not "this is *this*
+person." Fixed by sourcing a real ReID-trained model instead of training
+anything on MOT17 (small identity pool, real overfitting risk): **OSNet**
+pretrained by its original authors on MSMT17 (4101 identities, 15
+cameras — an actual ReID benchmark), downloaded from Hugging Face Hub
+(`kaiyangzhou/osnet`, reliable, unlike torchreid's own Google Drive-hosted
+model zoo). Verified the checkpoint loads with 0 missing/unexpected keys
+and is measurably more discriminative on real MOT17 crops (same-vs-diff
+identity cosine sim gap 0.511 vs. 0.428) before wiring it in. Real result
+this time: HOTA +0.77/+0.19 and IDF1 +1.11/+0.35 on mv-fixed/mv-adaptive,
+at an ~11-12% fps cost — kept opt-in (`--use-reid`) rather than default,
+since it's a real, but not free, tradeoff, and this project's headline
+throughput numbers shouldn't quietly get more expensive by default. See
+findings.md #13. Requires `torchreid`/`huggingface_hub` (added to
+`pyproject.toml`; `gdown`/`tensorboard` are unused transitive imports
+inside torchreid's own package, not used directly). Also hit and resolved
+a cosmetic gotcha: Apple's Accelerate BLAS (numpy's default backend on
+Apple Silicon) raises spurious divide-by-zero/overflow warnings on some
+embedding matmuls; verified output stays correct via a manual dot-product
+cross-check, suppressed the warning at the call site (`np.errstate`)
+rather than the underlying computation being wrong.
 
 **CorrectionNet (weeks 8-10 stretch goal) made things worse, not better,
 even after fixing the diagnosed train/inference mismatch.** v1 (single-step
