@@ -125,6 +125,25 @@ remain the pipelines to build on. Would revisit with appearance features
 or a per-track confidence gate (only apply correction when the net is
 confident) if returning to this.
 
+## Multi-stream throughput (weeks 11-12, local smoke clip, max streams @ >=25fps/stream)
+
+| Pipeline | max streams @ >=25fps | aggregate fps ceiling |
+|---|---|---|
+| baseline | 4 (n=6 drops to 18.6) | ~111 fps (saturates n=3-4) |
+| mv-fixed | >=8 (untested beyond, still 27.4 at n=8) | ~270 fps (peaks n=6) |
+| mv-adaptive | 8 (n=12 drops to 17.1) | ~209 fps (saturates n=6) |
+
+`scripts/bench_multistream.py` runs N pipeline instances as separate
+processes (spawn, not threads/fork — MPS contexts and GIL contention both
+argue against threads) on the same clip, sweeping stream count until
+per-stream fps drops below 25. Energy sampling via `powermetrics` needs
+passwordless sudo (`sudo -n`); not set up in this environment, so the
+power_mw column in `results/*.csv` is empty — set up a NOPASSWD sudoers
+rule for powermetrics if energy numbers are wanted later (a system change,
+do it yourself rather than having Claude edit sudoers). Results are
+committed CSVs (`results/`, NOT gitignored like `outputs/`) so the
+throughput/energy Pareto plots stay reproducible without rerunning.
+
 ## Working conventions
 
 - This is exploratory systems/research code, not a product — favor fast
