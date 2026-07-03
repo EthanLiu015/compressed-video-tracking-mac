@@ -8,6 +8,7 @@ dependencies = [
     "numpy",
     "opencv-python",
     "torch>=2.2",
+    "torchvision",
     "ultralytics>=8.2",
     "scipy",
     "tqdm",

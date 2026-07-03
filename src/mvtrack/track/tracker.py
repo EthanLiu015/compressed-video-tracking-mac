@@ -1,9 +1,10 @@
-"""Minimal IoU-matching track manager.
+"""Minimal IoU(+appearance)-matching track manager.
 
 Two update modes per frame:
 - `step_anchor`: full detector output re-associates with existing tracks via
-  IoU (Hungarian assignment). This is the only place identities are created,
-  corrected, or dropped.
+  IoU (Hungarian assignment), optionally blended with cosine similarity of
+  a learned appearance embedding (see `reid.py`). This is the only place
+  identities are created, corrected, or dropped.
 - `step_propagate`: no detector; every live track's box is shifted using the
   frame's motion-vector grid (see `propagate.py`). Track identity is never
   re-decided here — MV propagation stands in for a Kalman-filter predict
@@ -11,7 +12,12 @@ Two update modes per frame:
 
 This plays the role ByteTrack's Kalman predict + IoU-match loop plays in the
 full-decode baseline, but the "predict" comes from the codec instead of a
-motion model — that swap is the whole point of the project.
+motion model — that swap is the whole point of the project. Appearance is
+opt-in (`use_appearance`) because motion vectors carry zero information
+about what something looks like, which is a structural ceiling IoU-only
+association can't get past (see findings.md #9-12): it can't tell two
+overlapping people apart, or recover an identity across a gap too large
+for spatial overlap alone.
 """
 
 from dataclasses import dataclass, field
@@ -44,6 +50,7 @@ class Track:
     score: float
     since_detection: int = 0  # frames since last detector match; pruned past max_age
     hits: int = 1
+    embedding: np.ndarray | None = None  # EMA-smoothed appearance descriptor
 
 
 @dataclass
@@ -53,14 +60,29 @@ class MVTracker:
     high_conf_thresh: float = 0.5  # splits detections into ByteTrack-style high/low buckets
     iou_thresh_low: float = 0.2  # stage 2: low-conf dets recovering a track, looser gate
     iou_thresh_grace: float = 0.15  # stage 3: last chance before spawning a new ID
+    use_appearance: bool = False  # opt-in: requires embeddings passed to step_anchor
+    app_weight: float = 0.3  # blend of (1-iou) vs (1-cosine_sim) in the assignment cost
+    app_sim_thresh: float = 0.4  # min cosine sim required for stage 2/3 acceptance
+    app_ema_alpha: float = 0.9  # track embedding EMA smoothing (higher = more stable)
     _next_id: int = field(default=1, init=False)
     _tracks: dict[int, Track] = field(default_factory=dict, init=False)
 
-    def _spawn(self, box: np.ndarray, score: float) -> None:
-        self._tracks[self._next_id] = Track(id=self._next_id, box=box, score=score)
+    def _spawn(self, box: np.ndarray, score: float, embedding: np.ndarray | None = None) -> None:
+        self._tracks[self._next_id] = Track(id=self._next_id, box=box, score=score, embedding=embedding)
         self._next_id += 1
 
-    def step_anchor(self, boxes: np.ndarray, scores: np.ndarray) -> list[Track]:
+    def _update_embedding(self, tid: int, new_emb: np.ndarray) -> None:
+        tr = self._tracks[tid]
+        if tr.embedding is None:
+            tr.embedding = new_emb.copy()
+            return
+        e = self.app_ema_alpha * tr.embedding + (1 - self.app_ema_alpha) * new_emb
+        norm = np.linalg.norm(e)
+        tr.embedding = (e / norm) if norm > 0 else e
+
+    def step_anchor(
+        self, boxes: np.ndarray, scores: np.ndarray, embeddings: np.ndarray | None = None
+    ) -> list[Track]:
         """Three-stage ByteTrack-style association, replacing a single flat
         IoU match. A single pass caused real ID churn: any anchor frame
         where the detector missed a track (common with YOLOv8's imperfect
@@ -77,6 +99,14 @@ class MVTracker:
           track before falling through to spawning a new ID.
         Only high-confidence detections ever spawn a new track; unmatched
         low-confidence ones are discarded as too unreliable to seed an ID.
+
+        If `use_appearance` and `embeddings` (one row per box, matching
+        `boxes`' order) are both provided, the assignment cost blends IoU
+        with cosine similarity of each track's smoothed appearance
+        embedding, and stages 2/3 additionally require a minimum
+        similarity before accepting a loose-IoU match -- appearance helps
+        pick the right candidate in ambiguous/crowded cases and guards the
+        loosest stages against recovering the wrong track.
         """
         ids = list(self._tracks.keys())
         high_idx = np.where(scores >= self.high_conf_thresh)[0]
@@ -85,40 +115,72 @@ class MVTracker:
         matched_tracks: set[int] = set()
         matched_high: set[int] = set()
 
-        def _apply(track_ids, det_idx, thresh):
+        def _apply(track_ids: list[int], det_idx: np.ndarray, thresh: float, require_app: bool):
             m_tracks, m_dets = set(), set()
             if not track_ids or len(det_idx) == 0:
                 return m_tracks, m_dets
             track_boxes = np.array([self._tracks[t].box for t in track_ids])
             iou = _iou_matrix(track_boxes, boxes[det_idx])
-            row, col = linear_sum_assignment(-iou)
+
+            sim = None
+            if self.use_appearance and embeddings is not None:
+                det_embs = embeddings[det_idx]
+                has_emb = np.array([self._tracks[t].embedding is not None for t in track_ids])
+                track_embs = np.stack([
+                    self._tracks[t].embedding if self._tracks[t].embedding is not None
+                    else np.zeros(det_embs.shape[1], np.float32)
+                    for t in track_ids
+                ])
+                # numpy's Accelerate BLAS backend (default on Apple Silicon) raises
+                # spurious divide-by-zero/overflow FPE warnings on some matmuls
+                # involving many near-zero values (e.g. post-ReLU embeddings) even
+                # though the result is correct -- verified directly against a
+                # manual dot-product loop before suppressing this.
+                with np.errstate(all="ignore"):
+                    sim = track_embs @ det_embs.T
+                cost = (1 - self.app_weight) * (1 - iou) + self.app_weight * (1 - sim)
+                cost[~has_emb] = (1 - iou)[~has_emb]  # no embedding yet: fall back to IoU-only
+            else:
+                cost = 1 - iou
+
+            row, col = linear_sum_assignment(cost)
             for r, c in zip(row, col):
-                if iou[r, c] >= thresh:
-                    tid = track_ids[r]
-                    di = int(det_idx[c])
-                    self._tracks[tid].box = boxes[di]
-                    self._tracks[tid].score = scores[di]
-                    self._tracks[tid].since_detection = 0
-                    self._tracks[tid].hits += 1
-                    m_tracks.add(tid)
-                    m_dets.add(di)
+                if iou[r, c] < thresh:
+                    continue
+                tid = track_ids[r]
+                if (
+                    require_app
+                    and sim is not None
+                    and self._tracks[tid].embedding is not None
+                    and sim[r, c] < self.app_sim_thresh
+                ):
+                    continue
+                di = int(det_idx[c])
+                self._tracks[tid].box = boxes[di]
+                self._tracks[tid].score = scores[di]
+                self._tracks[tid].since_detection = 0
+                self._tracks[tid].hits += 1
+                if embeddings is not None:
+                    self._update_embedding(tid, embeddings[di])
+                m_tracks.add(tid)
+                m_dets.add(di)
             return m_tracks, m_dets
 
         # Stage 1: high-confidence detections vs. all tracks.
-        m1_tracks, m1_dets = _apply(ids, high_idx, self.iou_thresh)
+        m1_tracks, m1_dets = _apply(ids, high_idx, self.iou_thresh, require_app=False)
         matched_tracks |= m1_tracks
         matched_high |= m1_dets
 
         # Stage 2: low-confidence detections recover tracks stage 1 missed.
         remaining = [t for t in ids if t not in matched_tracks]
-        _m2_tracks, _m2_dets = _apply(remaining, low_idx, self.iou_thresh_low)
+        _m2_tracks, _m2_dets = _apply(remaining, low_idx, self.iou_thresh_low, require_app=True)
         matched_tracks |= _m2_tracks
         # low-conf detections never spawn, so their indices aren't tracked further
 
         # Stage 3: grace period for still-unmatched high-conf detections.
         still_unmatched = [t for t in ids if t not in matched_tracks]
         unmatched_high = np.array([di for di in high_idx if di not in matched_high])
-        m3_tracks, m3_dets = _apply(still_unmatched, unmatched_high, self.iou_thresh_grace)
+        m3_tracks, m3_dets = _apply(still_unmatched, unmatched_high, self.iou_thresh_grace, require_app=True)
         matched_tracks |= m3_tracks
         matched_high |= m3_dets
 
@@ -130,7 +192,8 @@ class MVTracker:
 
         for di in high_idx:
             if int(di) not in matched_high:
-                self._spawn(boxes[di], scores[di])
+                emb = embeddings[di] if embeddings is not None else None
+                self._spawn(boxes[di], scores[di], embedding=emb)
 
         return self.active_tracks()
 

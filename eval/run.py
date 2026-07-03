@@ -71,16 +71,21 @@ def run_mv_fixed(
     out_txt: pathlib.Path,
     anchor_interval: int = 5,
     weights: str = "yolov8s.pt",
+    use_reid: bool = False,
     **_kwargs,
 ) -> tuple[int, float]:
     """Detector fires every `anchor_interval` frames; MV propagation fills the
     rest. Frame 1 is always an anchor. Returns (frames, seconds)."""
-    from mvtrack.detect import Detector
+    from mvtrack.detect import Detector, pick_device
     from mvtrack.extract import iter_frames_with_mvs
     from mvtrack.track import MVTracker
 
     detector = Detector(weights)
-    tracker = MVTracker()
+    tracker = MVTracker(use_appearance=use_reid)
+    reid = None
+    if use_reid:
+        from mvtrack.track.reid import ReIDEmbedder
+        reid = ReIDEmbedder(device=pick_device())
     rows = []
     frames = 0
     t0 = time.perf_counter()
@@ -90,7 +95,8 @@ def run_mv_fixed(
             img = frame.to_ndarray(format="bgr24")
             boxes, scores, cls_ids = detector(img)
             keep = cls_ids == PERSON_CLS
-            tracks = tracker.step_anchor(boxes[keep], scores[keep])
+            embs = reid(img, boxes[keep]) if reid is not None else None
+            tracks = tracker.step_anchor(boxes[keep], scores[keep], embeddings=embs)
         else:
             tracks = tracker.step_propagate(fmv)
         for tr in tracks:
@@ -109,18 +115,23 @@ def run_mv_adaptive(
     out_txt: pathlib.Path,
     weights: str = "yolov8s.pt",
     scheduler_kwargs: dict | None = None,
+    use_reid: bool = False,
     **_kwargs,
 ) -> tuple[int, float]:
     """Same as run_mv_fixed but anchor timing comes from Adaptive (residual-
     energy-proxy) instead of a fixed interval. Returns (frames, seconds)."""
-    from mvtrack.detect import Detector
+    from mvtrack.detect import Detector, pick_device
     from mvtrack.extract import iter_frames_with_mvs
     from mvtrack.sched import Adaptive
     from mvtrack.track import MVTracker
 
     detector = Detector(weights)
-    tracker = MVTracker()
+    tracker = MVTracker(use_appearance=use_reid)
     scheduler = Adaptive(**(scheduler_kwargs or {}))
+    reid = None
+    if use_reid:
+        from mvtrack.track.reid import ReIDEmbedder
+        reid = ReIDEmbedder(device=pick_device())
     rows = []
     frames = 0
     anchors = 0
@@ -132,7 +143,8 @@ def run_mv_adaptive(
             img = frame.to_ndarray(format="bgr24")
             boxes, scores, cls_ids = detector(img)
             keep = cls_ids == PERSON_CLS
-            tracks = tracker.step_anchor(boxes[keep], scores[keep])
+            embs = reid(img, boxes[keep]) if reid is not None else None
+            tracks = tracker.step_anchor(boxes[keep], scores[keep], embeddings=embs)
         else:
             tracks = tracker.step_propagate(fmv)
         for tr in tracks:
@@ -252,6 +264,10 @@ def main() -> None:
         "--correction-checkpoint", default="correction_net.pt", help="mv-learned only"
     )
     ap.add_argument("--weights", default="yolov8s.pt", help="YOLO weights, all pipelines")
+    ap.add_argument(
+        "--use-reid", action="store_true",
+        help="blend a learned appearance embedding into association (mv-fixed/mv-adaptive)",
+    )
     args = ap.parse_args()
 
     videos = sorted((MOT / "videos").glob("MOT17-*-FRCNN.mp4"))
@@ -271,6 +287,7 @@ def main() -> None:
             anchor_interval=args.anchor_interval,
             correction_checkpoint=args.correction_checkpoint,
             weights=args.weights,
+            use_reid=args.use_reid,
         )
         fps = frames / dt
         fps_all.append(fps)

@@ -383,6 +383,58 @@ per-edge statistics or a way to detect when scale-change is actually
 happening (e.g. from box-size trend over recent anchors) before applying
 the correction selectively, rather than unconditionally on every box.
 
+## 13. Appearance-based re-identification — implemented, verified, near-zero real effect
+
+**What**: motion vectors carry zero information about what something looks
+like — a structural ceiling every fix so far had bumped into (findings.md
+#9-12). Built `ReIDEmbedder` (`src/mvtrack/track/reid.py`): a generic
+ImageNet-pretrained MobileNetV3-Small backbone (no time budget in this
+pass to curate MOT17 identity triplets and train a dedicated person-ReID
+model), global-average-pooled and L2-normalized, run on each anchor-frame
+detection crop. `MVTracker` (`use_appearance` flag, opt-in, off by
+default) blends cosine similarity into the IoU assignment cost across all
+three association stages, with an EMA-smoothed per-track embedding and an
+extra similarity floor gating stages 2/3 (the loosest, most
+recovery-prone stages) against recovering the wrong person. Verified via
+4 synthetic scenarios first: appearance breaks an IoU tie toward the
+correct person, a wrong-appearance low-conf detection is correctly
+rejected by the similarity floor despite good IoU, embedding EMA update
+behaves as expected, and `use_appearance=False` is unaffected even if
+embeddings are passed. Also hit and diagnosed a real but cosmetic bug:
+Apple's Accelerate BLAS backend (numpy's default on Apple Silicon) raises
+spurious divide-by-zero/overflow warnings on some embedding matmuls;
+verified the actual output stays correct and finite via a manual
+dot-product cross-check before suppressing the warning at the call site.
+
+**Metric impact**:
+
+| Pipeline | HOTA (off→on) | MOTA (off→on) | IDF1 (off→on) | mean fps (off→on) |
+|---|---|---|---|---|
+| mv-fixed (interval=5) | 35.73→35.82 | 26.38→26.49 | 42.47→42.55 | 38.5→36.1 |
+| mv-adaptive (tuned) | 35.40→35.40 | 25.42→25.41 | 42.71→42.63 | 44.2→46.2 |
+
+**Read**: essentially flat — every delta is within the fps/run-to-run
+noise already documented elsewhere in this project, and mv-adaptive
+shows literally zero net movement. Before concluding the idea itself is
+dead, ran one more diagnostic: on MOT17-04 (the most crowded sequence),
+appearance actually changes the Hungarian assignment vs. IoU-only on 16
+of 61 sampled anchor-to-anchor comparisons (26%) — so the signal isn't
+being gated into irrelevance by overly conservative thresholds, it's
+genuinely influencing roughly a quarter of decisions. It just isn't
+influencing them *correctly* enough, on net, to beat IoU alone. Most
+likely explanation: a generic ImageNet classification backbone's features
+emphasize "this is a person" (object category), not "this is *this*
+person" (individual identity/clothing/texture) — exactly the gap the ReID
+literature's dedicated metric-learning training (triplet/contrastive loss
+on same-vs-different-person pairs) exists to close, and exactly what this
+implementation doesn't have. Kept in the codebase as an opt-in
+(`--use-reid`, off by default, zero cost when unused) rather than reverted
+like #12, since it's a genuine working capability with a clearly
+diagnosed limitation, not a net-negative default. Swapping in a real
+pretrained person-ReID model (not something available as a drop-in
+dependency here) is the natural next step if this is revisited — the
+association/gating machinery already built should carry over unchanged.
+
 ## Summary: what actually worked vs. didn't
 
 - **Worked, real and reproducible**: MV propagation for throughput (at a
@@ -411,3 +463,17 @@ the correction selectively, rather than unconditionally on every box.
   measured flat-to-slightly-negative on real MOT17 (MOTA down in both
   mv-fixed and mv-adaptive) — reverted to the original rather than kept
   for a mixed-at-best result, the same discipline applied to CorrectionNet.
+- **Didn't move the needle, kept as opt-in rather than reverted**:
+  appearance-based re-identification (#13). Built, verified, and
+  integrated a full ImageNet-pretrained embedding pipeline into
+  `MVTracker`'s association — confirmed via direct measurement that it's
+  genuinely influencing ~26% of assignment decisions on the most crowded
+  sequence, not just sitting inert behind conservative gating, yet the net
+  effect on HOTA/MOTA/IDF1 is flat (within run-to-run noise) on both
+  mv-fixed and mv-adaptive. Diagnosed cause: generic ImageNet classifier
+  features encode "this is a person," not "this is *this* person" — the
+  exact gap dedicated ReID metric-learning training exists to close, and
+  exactly what a from-scratch pass without that training doesn't have.
+  Kept as a working, opt-in capability (off by default, zero cost when
+  unused) rather than reverted, since — unlike #12 — it isn't net-negative,
+  just not yet net-positive.

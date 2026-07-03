@@ -114,6 +114,7 @@ python eval/run.py --pipeline mv-fixed --anchor-interval 5
 python eval/run.py --pipeline mv-adaptive
 python eval/run.py --pipeline mv-learned --correction-checkpoint correction_net_v2.pt
 python eval/run.py --pipeline baseline --weights yolov8n.pt   # compare against the old default
+python eval/run.py --pipeline mv-fixed --use-reid       # opt-in appearance-based re-id (see findings.md #13)
 python scripts/tune_scheduler.py           # grid-search Adaptive's params against real MOTA
 ```
 
