@@ -130,8 +130,19 @@ confident) if returning to this.
 | Pipeline | max streams @ >=25fps | aggregate fps ceiling |
 |---|---|---|
 | baseline | 4 (n=6 drops to 18.6) | ~111 fps (saturates n=3-4) |
-| mv-fixed | >=8 (untested beyond, still 27.4 at n=8) | ~270 fps (peaks n=6) |
+| mv-fixed | 8 (n=10 drops to 21.5) | ~270 fps (peaks n=6) |
 | mv-adaptive | 8 (n=12 drops to 17.1) | ~209 fps (saturates n=6) |
+
+**Multi-stream sweeps can hang mid-run** (seen once: 6 spawned workers sat
+at flat CPU time for 10+ minutes at the n=6 stage, no forward progress).
+Cause not root-caused (suspect MPS/Metal context contention across
+processes, not confirmed) — if a sweep looks stuck, check
+`ps aux | grep bench_multistream` for CPU time not advancing across two
+checks a minute apart, and just `kill -9` the tree and rerun rather than
+waiting indefinitely. `bench_multistream.py` overwrites its output CSV
+wholesale at the end of each run, so a killed run loses that run's data
+entirely — rerun with the full `--streams` list rather than resuming from
+where it died, or the CSV ends up with only the last completed subset.
 
 `scripts/bench_multistream.py` runs N pipeline instances as separate
 processes (spawn, not threads/fork — MPS contexts and GIL contention both
