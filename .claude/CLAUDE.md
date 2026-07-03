@@ -86,7 +86,8 @@ scripts/     # data prep, demos, smoke tests
 | baseline (full decode+detect every frame) | 36.0 | 33.3 | 42.1 | 29.8 |
 | mv-fixed (anchor every 5th frame) | 32.0 | 11.3 | 36.0 | 40.2 |
 | mv-adaptive (~8% anchor rate) | 29.3 | 13.3 | 33.7 | 69.8 |
-| mv-learned (mv-fixed + CorrectionNet) | 31.1 | 7.0 | 34.8 | 34.5 |
+| mv-learned v1 (mv-fixed + CorrectionNet, single-step training) | 31.1 | 7.0 | 34.8 | 34.5 |
+| mv-learned v2 (mv-fixed + CorrectionNet, DAgger rollout training) | 30.5 | 9.1 | 35.0 | 40.0 |
 
 MV propagation is a real accuracy/throughput tradeoff, not a free win —
 MOTA drops hard (33→11-13%) because propagation drift between anchors hurts
@@ -94,19 +95,35 @@ more on MOT17's crowded/static-camera scenes than it did on the low-res
 smoke-test clip. This is the honest weeks 5-7 result; report it as-is rather
 than only the throughput number.
 
-**CorrectionNet (weeks 8-10 stretch goal) made things worse, not better** —
-worse on every accuracy metric than plain mv-fixed, and slower (added
-inference cost, no offsetting gain). It beat a "predict zero residual"
-baseline by ~19% MSE in isolated single-step regression (GT box at t -> GT
-box at t+1, held-out sequence), but that didn't transfer to the full
-pipeline. Most likely cause: **train/inference distribution mismatch** —
-training only ever sees one propagation step starting from a perfect GT
-box, but inference chains the net's own corrections across multiple
-already-drifted, already-corrected frames between anchors (same failure
-mode as exposure bias in seq2seq training). Fix would be training on
-multi-step rollouts (feed the net's own output back in during training,
-not just single ground-truth-anchored steps) rather than tuning the
-architecture — noted as a follow-up, not attempted yet.
+**CorrectionNet (weeks 8-10 stretch goal) made things worse, not better,
+even after fixing the diagnosed train/inference mismatch.** v1 (single-step
+training: GT box at t -> GT box at t+1) beat a zero-residual baseline by
+~19% MSE in isolation but scored worse than plain mv-fixed on every
+tracking metric. Diagnosis: training only saw one propagation step from a
+perfect GT box, while inference chains the net's own corrections across
+multiple already-drifted frames between anchors (exposure-bias-like
+failure mode). Fix: `scripts/build_rollout_dataset.py` re-walks real anchor
+windows using the trained checkpoint itself to generate on-policy targets
+(DAgger-style — the net's own rollout trajectory, not GT-anchored steps),
+then `train_correction.py --datasets <original> <rollout>` retrains from
+scratch on the aggregate. Needed a robust loss (`SmoothL1Loss` + grad
+clipping) since rollout targets are heavy-tailed — plain MSE training
+destabilized (val loss spiking 10x between epochs) because a chained
+correction occasionally sends a box far off in crowded/occluded cases.
+
+Result of the fix: v2 val MSE improved (26% below zero-residual baseline,
+vs. 19% for v1) and MOTA/IDF1 both improved over v1 in the full pipeline
+(MOTA 7.0->9.1, IDF1 34.8->35.0) — the mismatch diagnosis was correct and
+the fix measurably helped. But it didn't flip the verdict: v2 is still
+worse than plain mv-fixed (no correction at all) on HOTA and MOTA. Current
+read: a 50-param MLP over pooled MV/occupancy features (no appearance
+signal) may just be under-powered for this correction task — its per-frame
+noise costs more than its average drift-correction saves, so the tracker's
+own periodic re-anchoring is currently a better use of that compute than
+learned correction. Not pursuing further for now; mv-fixed/mv-adaptive
+remain the pipelines to build on. Would revisit with appearance features
+or a per-track confidence gate (only apply correction when the net is
+confident) if returning to this.
 
 ## Working conventions
 

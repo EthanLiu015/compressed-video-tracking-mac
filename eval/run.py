@@ -138,10 +138,14 @@ def run_mv_adaptive(
 
 
 def run_mv_learned(
-    video: pathlib.Path, out_txt: pathlib.Path, anchor_interval: int = 5, **_kwargs
+    video: pathlib.Path,
+    out_txt: pathlib.Path,
+    anchor_interval: int = 5,
+    correction_checkpoint: str = "correction_net.pt",
+    **_kwargs,
 ) -> tuple[int, float]:
     """Same as run_mv_fixed but CorrectionNet adjusts each propagated box.
-    Requires outputs/correction_net.pt (scripts/train_correction.py).
+    Requires outputs/<correction_checkpoint> (scripts/train_correction.py).
     Returns (frames, seconds)."""
     import torch
 
@@ -152,7 +156,9 @@ def run_mv_learned(
 
     device = pick_device()
     net = CorrectionNet().to(device)
-    net.load_state_dict(torch.load(ROOT / "outputs" / "correction_net.pt", map_location=device))
+    net.load_state_dict(
+        torch.load(ROOT / "outputs" / correction_checkpoint, map_location=device)
+    )
     net.eval()
 
     detector = Detector("yolov8n.pt")
@@ -231,6 +237,9 @@ def main() -> None:
     ap.add_argument("--pipeline", choices=PIPELINES, default="baseline")
     ap.add_argument("--seqs", nargs="*", help="e.g. MOT17-02 (default: all)")
     ap.add_argument("--anchor-interval", type=int, default=5, help="mv-fixed only")
+    ap.add_argument(
+        "--correction-checkpoint", default="correction_net.pt", help="mv-learned only"
+    )
     args = ap.parse_args()
 
     videos = sorted((MOT / "videos").glob("MOT17-*-FRCNN.mp4"))
@@ -245,7 +254,10 @@ def main() -> None:
         seq = video.stem  # e.g. MOT17-02-FRCNN — must match GT folder name
         res_txt = out_dir / f"{seq}.txt"
         frames, dt = PIPELINES[args.pipeline](
-            video, res_txt, anchor_interval=args.anchor_interval
+            video,
+            res_txt,
+            anchor_interval=args.anchor_interval,
+            correction_checkpoint=args.correction_checkpoint,
         )
         fps = frames / dt
         fps_all.append(fps)

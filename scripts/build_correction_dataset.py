@@ -13,28 +13,16 @@ import pathlib
 import sys
 
 import numpy as np
-import pandas as pd
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from mvtrack.extract import iter_frames_with_mvs
+from mvtrack.mot_gt import load_gt
 from mvtrack.track.correct import extract_features
 from mvtrack.track.propagate import propagate_boxes
 
 MOT = ROOT / "data" / "MOT17"
-GT_COLS = ["frame", "id", "l", "t", "w", "h", "conf", "cls", "vis"]
-
-
-def load_gt(seq_dir: pathlib.Path) -> dict[int, dict[int, np.ndarray]]:
-    """frame -> {track_id: box_xyxy}, pedestrian class + evaluated boxes only."""
-    df = pd.read_csv(seq_dir / "gt" / "gt.txt", header=None, names=GT_COLS)
-    df = df[(df["cls"] == 1) & (df["conf"] == 1)]
-    out: dict[int, dict[int, np.ndarray]] = {}
-    for row in df.itertuples():
-        box = np.array([row.l, row.t, row.l + row.w, row.t + row.h], np.float32)
-        out.setdefault(row.frame, {})[row.id] = box
-    return out
 
 
 def build_sequence(seq_name: str) -> tuple[np.ndarray, np.ndarray]:

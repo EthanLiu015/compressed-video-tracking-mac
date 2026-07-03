@@ -1,11 +1,15 @@
-"""Train CorrectionNet on the dataset from build_correction_dataset.py.
+"""Train CorrectionNet on dataset(s) from build_correction_dataset.py and/or
+build_rollout_dataset.py.
 
 Holds out one full sequence (not a random row split) so validation loss
 reflects generalization to an unseen scene, not just unseen frames of a
 scene the net has already partially seen.
 
-Usage: python scripts/train_correction.py [--epochs 30] [--holdout MOT17-11-FRCNN]
-Writes outputs/correction_net.pt
+Usage:
+    python scripts/train_correction.py [--epochs 30] [--holdout MOT17-11-FRCNN]
+    python scripts/train_correction.py --datasets outputs/correction_dataset.npz \
+        outputs/correction_dataset_rollout.npz --out outputs/correction_net_v2.pt
+Writes outputs/correction_net.pt (or --out).
 """
 
 import argparse
@@ -48,14 +52,25 @@ def main() -> None:
     ap.add_argument("--holdout", default="MOT17-11-FRCNN")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--batch-size", type=int, default=256)
+    ap.add_argument(
+        "--datasets", nargs="+",
+        default=[str(ROOT / "outputs" / "correction_dataset.npz")],
+        help="one or more .npz files (same schema); concatenated for training",
+    )
+    ap.add_argument("--out", default=str(ROOT / "outputs" / "correction_net.pt"))
     args = ap.parse_args()
 
     device = pick_device()
     sanity_check(device)
 
-    data = np.load(ROOT / "outputs" / "correction_dataset.npz", allow_pickle=True)
-    feats, labels, seq_ids = data["feats"], data["labels"], data["seq_ids"]
-    seq_names = list(data["seq_names"])
+    datasets = [np.load(p, allow_pickle=True) for p in args.datasets]
+    seq_names = list(datasets[0]["seq_names"])
+    for d, p in zip(datasets[1:], args.datasets[1:]):
+        assert list(d["seq_names"]) == seq_names, f"{p} has different seq_names ordering"
+    feats = np.concatenate([d["feats"] for d in datasets])
+    labels = np.concatenate([d["labels"] for d in datasets])
+    seq_ids = np.concatenate([d["seq_ids"] for d in datasets])
+    print(f"loaded {len(feats)} pairs from {len(datasets)} dataset(s): {args.datasets}")
     holdout_idx = seq_names.index(args.holdout)
 
     train_mask = seq_ids != holdout_idx
@@ -73,7 +88,13 @@ def main() -> None:
 
     model = CorrectionNet().to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    loss_fn = nn.MSELoss()
+    # Huber loss for training: rollout data has heavy-tailed targets (a
+    # chained correction occasionally drifts a track far off, especially in
+    # crowded/occluded cases), and plain MSE on those outliers destabilized
+    # training (val loss spiking 10x between epochs). MSE is still used for
+    # val reporting so it stays comparable to the zero-residual baseline.
+    train_loss_fn = nn.SmoothL1Loss(beta=0.5)
+    mse_fn = nn.MSELoss()
     n = len(x_train)
 
     best_val, best_state = float("inf"), None
@@ -84,20 +105,21 @@ def main() -> None:
         for i in range(0, n, args.batch_size):
             idx = perm[i : i + args.batch_size]
             opt.zero_grad()
-            loss = loss_fn(model(x_train[idx]), y_train[idx])
+            loss = train_loss_fn(model(x_train[idx]), y_train[idx])
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
             total += loss.item() * len(idx)
         model.eval()
         with torch.no_grad():
-            val_mse = loss_fn(model(x_val), y_val).item()
+            val_mse = mse_fn(model(x_val), y_val).item()
         if val_mse < best_val:
             best_val = val_mse
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
         print(f"epoch {epoch+1}/{args.epochs}: train MSE={total/n:.5f} val MSE={val_mse:.5f}")
 
     print(f"best val MSE={best_val:.5f} (zero-residual baseline={zero_val_mse:.5f})")
-    out = ROOT / "outputs" / "correction_net.pt"
+    out = pathlib.Path(args.out)
     torch.save(best_state, out)
     print(f"saved {out}")
 
