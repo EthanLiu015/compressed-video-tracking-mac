@@ -58,7 +58,7 @@ def main() -> None:
     ap.add_argument("--max-frames", type=int, default=300)
     args = ap.parse_args()
 
-    detector = Detector("yolov8n.pt")
+    detector = Detector("yolov8s.pt")
     baseline_tracker = MVTracker()
     adaptive_tracker = MVTracker()
     scheduler = Adaptive()

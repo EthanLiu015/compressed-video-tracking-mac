@@ -34,13 +34,15 @@ RESULTS = ROOT / "outputs" / "results"
 PERSON_CLS = 0  # COCO 'person' in YOLO
 
 
-def run_baseline(video: pathlib.Path, out_txt: pathlib.Path, **_kwargs) -> tuple[int, float]:
+def run_baseline(
+    video: pathlib.Path, out_txt: pathlib.Path, weights: str = "yolov8s.pt", **_kwargs
+) -> tuple[int, float]:
     """Full decode + YOLOv8 + ByteTrack every frame. Returns (frames, seconds)."""
     from ultralytics import YOLO
 
     from mvtrack.detect import pick_device
 
-    model = YOLO("yolov8n.pt")
+    model = YOLO(weights)
     rows = []
     frames = 0
     t0 = time.perf_counter()
@@ -65,7 +67,11 @@ def run_baseline(video: pathlib.Path, out_txt: pathlib.Path, **_kwargs) -> tuple
 
 
 def run_mv_fixed(
-    video: pathlib.Path, out_txt: pathlib.Path, anchor_interval: int = 5, **_kwargs
+    video: pathlib.Path,
+    out_txt: pathlib.Path,
+    anchor_interval: int = 5,
+    weights: str = "yolov8s.pt",
+    **_kwargs,
 ) -> tuple[int, float]:
     """Detector fires every `anchor_interval` frames; MV propagation fills the
     rest. Frame 1 is always an anchor. Returns (frames, seconds)."""
@@ -73,7 +79,7 @@ def run_mv_fixed(
     from mvtrack.extract import iter_frames_with_mvs
     from mvtrack.track import MVTracker
 
-    detector = Detector("yolov8n.pt")
+    detector = Detector(weights)
     tracker = MVTracker()
     rows = []
     frames = 0
@@ -99,7 +105,11 @@ def run_mv_fixed(
 
 
 def run_mv_adaptive(
-    video: pathlib.Path, out_txt: pathlib.Path, **_kwargs
+    video: pathlib.Path,
+    out_txt: pathlib.Path,
+    weights: str = "yolov8s.pt",
+    scheduler_kwargs: dict | None = None,
+    **_kwargs,
 ) -> tuple[int, float]:
     """Same as run_mv_fixed but anchor timing comes from Adaptive (residual-
     energy-proxy) instead of a fixed interval. Returns (frames, seconds)."""
@@ -108,9 +118,9 @@ def run_mv_adaptive(
     from mvtrack.sched import Adaptive
     from mvtrack.track import MVTracker
 
-    detector = Detector("yolov8n.pt")
+    detector = Detector(weights)
     tracker = MVTracker()
-    scheduler = Adaptive()
+    scheduler = Adaptive(**(scheduler_kwargs or {}))
     rows = []
     frames = 0
     anchors = 0
@@ -142,6 +152,7 @@ def run_mv_learned(
     out_txt: pathlib.Path,
     anchor_interval: int = 5,
     correction_checkpoint: str = "correction_net.pt",
+    weights: str = "yolov8s.pt",
     **_kwargs,
 ) -> tuple[int, float]:
     """Same as run_mv_fixed but CorrectionNet adjusts each propagated box.
@@ -161,7 +172,7 @@ def run_mv_learned(
     )
     net.eval()
 
-    detector = Detector("yolov8n.pt")
+    detector = Detector(weights)
     tracker = MVTracker()
     rows = []
     frames = 0
@@ -240,6 +251,7 @@ def main() -> None:
     ap.add_argument(
         "--correction-checkpoint", default="correction_net.pt", help="mv-learned only"
     )
+    ap.add_argument("--weights", default="yolov8s.pt", help="YOLO weights, all pipelines")
     args = ap.parse_args()
 
     videos = sorted((MOT / "videos").glob("MOT17-*-FRCNN.mp4"))
@@ -258,6 +270,7 @@ def main() -> None:
             res_txt,
             anchor_interval=args.anchor_interval,
             correction_checkpoint=args.correction_checkpoint,
+            weights=args.weights,
         )
         fps = frames / dt
         fps_all.append(fps)

@@ -193,6 +193,37 @@ exactly the MOTA cost quantified in finding #1, not a rendering bug. A
 demo that only shows the pipeline's best moments would undersell how real
 the accuracy/throughput tradeoff actually is.
 
+## 9. Detector ceiling check (YOLOv8n → YOLOv8s)
+
+**What**: baseline's own HOTA (36.0) fell well short of the project plan's
+own weeks 1-2 acceptance bar ("~60 with a good detector"), and every
+pipeline shares the same detector at anchor frames — so part of the
+accuracy gap might be "the detector is weak," not "MV propagation is
+lossy." Tested by swapping `yolov8n.pt` for `yolov8s.pt` (one line, no new
+code) and rerunning all four pipelines on full MOT17.
+
+**Metric impact**:
+
+| Pipeline | HOTA (n→s) | MOTA (n→s) | IDF1 (n→s) | fps (n→s) |
+|---|---|---|---|---|
+| baseline | 36.0 → 40.5 | 33.3 → 38.9 | 42.1 → 48.6 | 29.8 → 20.8 |
+| mv-fixed | 32.0 → 34.7 | 11.3 → 13.8 | 36.0 → 39.9 | 40.2 → 37.8 |
+| mv-adaptive | 29.3 → 32.2 | 13.3 → 16.3 | 33.7 → 37.5 | 69.8 → 63.6 |
+| mv-learned v2 | 30.5 → 33.2 | 9.1 → 11.2 | 35.0 → 38.4 | 40.0 → 32.6 |
+
+**Read**: real, consistent gains across every pipeline (HOTA +2.7 to +4.5,
+MOTA +2.1 to +5.6, IDF1 +2.8 to +6.5), confirming detector quality was a
+genuine, separable lever from the MV propagation approach. The fps cost is
+proportional to how often each pipeline actually calls the detector —
+baseline pays the full ~30% throughput cost (every frame), mv-adaptive
+pays the least (~9%, since it only detects on ~8% of frames). Adopted as
+the new project default (`Detector`'s and `eval/run.py`'s default weights).
+Baseline HOTA (40.5) still falls short of the ~60 ballpark, so detector
+quality wasn't the whole story either — the accuracy gap between baseline
+and the mv-* pipelines is unaffected by this change (still the same real
+propagation-drift and ID-churn issues, see findings #1 and #7), just at a
+uniformly higher starting point.
+
 ## Summary: what actually worked vs. didn't
 
 - **Worked, real and reproducible**: MV propagation for throughput (at a
@@ -200,8 +231,10 @@ the accuracy/throughput tradeoff actually is.
   better MOTA than fixed-interval, at similar-ish accuracy elsewhere),
   the grid-build vectorization (necessary infrastructure fix, not
   optional), multi-stream scaling advantage (2x concurrent streams for
-  both mv-fixed and mv-adaptive), and a genuinely non-obvious ablation
-  result (anchor frequency vs. MOTA is non-monotonic).
+  both mv-fixed and mv-adaptive), a genuinely non-obvious ablation
+  result (anchor frequency vs. MOTA is non-monotonic), and confirming
+  detector quality was a real, cheap-to-fix lever separate from the MV
+  approach (YOLOv8n → YOLOv8s raised every pipeline's accuracy).
 - **Didn't work, but rigorously diagnosed**: learned box correction.
   Root-caused a real distribution-mismatch bug, fixed it with a
   principled method (DAgger), validated the fix's partial effect with

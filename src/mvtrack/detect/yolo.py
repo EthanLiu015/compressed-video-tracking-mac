@@ -10,7 +10,7 @@ def pick_device() -> str:
 
 
 class Detector:
-    def __init__(self, weights: str = "yolov8n.pt", device: str | None = None, conf: float = 0.25):
+    def __init__(self, weights: str = "yolov8s.pt", device: str | None = None, conf: float = 0.25):
         self.model = YOLO(weights)
         self.device = device or pick_device()
         self.conf = conf

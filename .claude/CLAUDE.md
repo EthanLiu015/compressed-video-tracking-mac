@@ -79,21 +79,46 @@ scripts/     # data prep, demos, smoke tests
   stronger signal is needed (would require a custom FFmpeg build or ctypes
   into libavcodec internals).
 
-## Results (MOT17 train, all 7 FRCNN sequences, YOLOv8n person-class only)
+## Results (MOT17 train, all 7 FRCNN sequences, person-class only)
+
+**Current default detector: YOLOv8s** (`weights="yolov8s.pt"`, default in
+`Detector` and `eval/run.py --weights`). Confirmed via a direct ceiling
+check that detector quality was a real, separate lever from the MV
+propagation approach — swapping YOLOv8n -> YOLOv8s raised every pipeline's
+accuracy with only a modest fps cost (much smaller for the mv-* pipelines
+than for baseline, since they only run the detector on a fraction of
+frames):
 
 | Pipeline | HOTA | MOTA | IDF1 | mean fps |
 |---|---|---|---|---|
-| baseline (full decode+detect every frame) | 36.0 | 33.3 | 42.1 | 29.8 |
-| mv-fixed (anchor every 5th frame) | 32.0 | 11.3 | 36.0 | 40.2 |
-| mv-adaptive (~8% anchor rate) | 29.3 | 13.3 | 33.7 | 69.8 |
-| mv-learned v1 (mv-fixed + CorrectionNet, single-step training) | 31.1 | 7.0 | 34.8 | 34.5 |
-| mv-learned v2 (mv-fixed + CorrectionNet, DAgger rollout training) | 30.5 | 9.1 | 35.0 | 40.0 |
+| baseline (full decode+detect every frame) | 40.5 | 38.9 | 48.6 | 20.8 |
+| mv-fixed (anchor every 5th frame) | 34.7 | 13.8 | 39.9 | 37.8 |
+| mv-adaptive (~8% anchor rate) | 32.2 | 16.3 | 37.5 | 63.6 |
+| mv-learned v2 (mv-fixed + CorrectionNet, DAgger rollout training) | 33.2 | 11.2 | 38.4 | 32.6 |
+
+<details>
+<summary>Superseded YOLOv8n numbers (kept for reference — see git history for the full swap commit)</summary>
+
+| Pipeline | HOTA | MOTA | IDF1 | mean fps |
+|---|---|---|---|---|
+| baseline | 36.0 | 33.3 | 42.1 | 29.8 |
+| mv-fixed | 32.0 | 11.3 | 36.0 | 40.2 |
+| mv-adaptive | 29.3 | 13.3 | 33.7 | 69.8 |
+| mv-learned v1 (single-step training) | 31.1 | 7.0 | 34.8 | 34.5 |
+| mv-learned v2 (DAgger rollout training) | 30.5 | 9.1 | 35.0 | 40.0 |
+
+</details>
 
 MV propagation is a real accuracy/throughput tradeoff, not a free win —
-MOTA drops hard (33→11-13%) because propagation drift between anchors hurts
-more on MOT17's crowded/static-camera scenes than it did on the low-res
-smoke-test clip. This is the honest weeks 5-7 result; report it as-is rather
-than only the throughput number.
+MOTA drops hard (baseline ~39% vs mv-fixed/mv-adaptive ~14-16%) because
+propagation drift between anchors hurts more on MOT17's crowded,
+often-static-camera scenes than it did on the low-res smoke-test clip
+used early on. This is the honest core result; report it as-is rather
+than only the throughput number. Note baseline itself (HOTA 40.5) still
+falls short of a well-tuned ByteTrack-on-MOT17 ballpark (~60) — YOLOv8s is
+better than YOLOv8n but still a small/fast model; a larger detector
+(yolov8m/l) or confidence/NMS tuning would likely raise the ceiling
+further at additional throughput cost, not attempted here.
 
 **CorrectionNet (weeks 8-10 stretch goal) made things worse, not better,
 even after fixing the diagnosed train/inference mismatch.** v1 (single-step
@@ -126,6 +151,11 @@ or a per-track confidence gate (only apply correction when the net is
 confident) if returning to this.
 
 ## Multi-stream throughput (weeks 11-12, local smoke clip, max streams @ >=25fps/stream)
+
+**Measured on YOLOv8n** (predates the detector swap above) — not rerun
+with YOLOv8s since a bigger/slower detector would only lower these
+ceilings, not invalidate the relative baseline-vs-mv-* comparison. Same
+caveat applies to the anchor-interval ablation in `findings.md` #7.
 
 | Pipeline | max streams @ >=25fps | aggregate fps ceiling |
 |---|---|---|

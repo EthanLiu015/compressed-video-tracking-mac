@@ -13,21 +13,26 @@ on Apple Silicon (M4, PyTorch MPS, no CUDA/NVDEC).
 ## Results
 
 All numbers are on real MOT17 train ground truth (7 FRCNN sequences),
-YOLOv8n person-class detector. Full detail and honest negative results in
-`findings.md`; per-session narrative in `.claude/CLAUDE.md`.
+YOLOv8s person-class detector (the project default — a ceiling check
+confirmed YOLOv8n was leaving real accuracy on the table across every
+pipeline). Full detail and honest negative results in `findings.md`;
+per-session narrative in `.claude/CLAUDE.md`.
 
 | Pipeline | HOTA | MOTA | IDF1 | mean fps |
 |---|---|---|---|---|
-| baseline (full decode + detect every frame) | 36.0 | 33.3 | 42.1 | 29.8 |
-| mv-fixed (anchor every 5th frame) | 32.0 | 11.3 | 36.0 | 40.2 |
-| mv-adaptive (residual-energy-proxy scheduler, ~8% anchor rate) | 29.3 | 13.3 | 33.7 | 69.8 |
-| mv-learned (mv-fixed + learned box correction) | 30.5 | 9.1 | 35.0 | 40.0 |
+| baseline (full decode + detect every frame) | 40.5 | 38.9 | 48.6 | 20.8 |
+| mv-fixed (anchor every 5th frame) | 34.7 | 13.8 | 39.9 | 37.8 |
+| mv-adaptive (residual-energy-proxy scheduler, ~8% anchor rate) | 32.2 | 16.3 | 37.5 | 63.6 |
+| mv-learned (mv-fixed + learned box correction) | 33.2 | 11.2 | 38.4 | 32.6 |
 
 ![HOTA/MOTA vs throughput](results/plots/pipeline_pareto.png)
 
 MV propagation trades real accuracy for real throughput — not a free win.
 mv-adaptive roughly doubles baseline's max concurrent-stream capacity on the
-same chip at a fixed 25fps/stream quality bar:
+same chip at a fixed 25fps/stream quality bar (multi-stream and ablation
+numbers below were measured on YOLOv8n, before the detector swap above —
+not rerun since a slower detector only lowers these ceilings, it doesn't
+change the baseline-vs-mv-* comparison):
 
 | Pipeline | max concurrent streams @ >=25fps/stream |
 |---|---|
@@ -90,10 +95,11 @@ python scripts/baseline_smoke.py          # full-decode detect+track baseline
 ## Evaluation
 
 ```bash
-python eval/run.py --pipeline baseline
+python eval/run.py --pipeline baseline                 # --weights yolov8s.pt is the default
 python eval/run.py --pipeline mv-fixed --anchor-interval 5
 python eval/run.py --pipeline mv-adaptive
 python eval/run.py --pipeline mv-learned --correction-checkpoint correction_net_v2.pt
+python eval/run.py --pipeline baseline --weights yolov8n.pt   # compare against the old default
 ```
 
 ## Learned box correction (optional, stretch goal)
