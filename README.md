@@ -15,24 +15,34 @@ on Apple Silicon (M4, PyTorch MPS, no CUDA/NVDEC).
 All numbers are on real MOT17 train ground truth (7 FRCNN sequences),
 YOLOv8s person-class detector (the project default — a ceiling check
 confirmed YOLOv8n was leaving real accuracy on the table across every
-pipeline). Full detail and honest negative results in `findings.md`;
-per-session narrative in `.claude/CLAUDE.md`.
+pipeline) plus a fixed three-stage ByteTrack-style re-association in
+`MVTracker` (see below). Full detail and honest negative results in
+`findings.md`; per-session narrative in `.claude/CLAUDE.md`.
 
 | Pipeline | HOTA | MOTA | IDF1 | mean fps |
 |---|---|---|---|---|
 | baseline (full decode + detect every frame) | 40.5 | 38.9 | 48.6 | 20.8 |
-| mv-fixed (anchor every 5th frame) | 34.7 | 13.8 | 39.9 | 37.8 |
-| mv-adaptive (residual-energy-proxy scheduler, ~8% anchor rate) | 32.2 | 16.3 | 37.5 | 63.6 |
-| mv-learned (mv-fixed + learned box correction) | 33.2 | 11.2 | 38.4 | 32.6 |
+| mv-fixed (anchor every 5th frame) | 35.7 | 26.4 | 42.5 | 38.5 |
+| mv-adaptive (residual-energy-proxy scheduler, ~8% anchor rate) | 32.5 | 21.8 | 39.1 | 62.9 |
+| mv-learned (mv-fixed + learned box correction) | 34.6 | 25.5 | 41.7 | 33.7 |
 
 ![HOTA/MOTA vs throughput](results/plots/pipeline_pareto.png)
 
-MV propagation trades real accuracy for real throughput — not a free win.
-mv-adaptive roughly doubles baseline's max concurrent-stream capacity on the
-same chip at a fixed 25fps/stream quality bar (multi-stream and ablation
-numbers below were measured on YOLOv8n, before the detector swap above —
-not rerun since a slower detector only lowers these ceilings, it doesn't
-change the baseline-vs-mv-* comparison):
+MV propagation still trades real accuracy for real throughput — not a
+free win — but about half of that gap turned out to be a fixable bug, not
+an inherent cost. The original single-pass IoU re-association in
+`MVTracker.step_anchor` spawned a brand-new track ID for any detection it
+couldn't match, and an anchor-interval ablation showed this made *more*
+anchors actively *hurt* MOTA (findings.md #7) — the opposite of intuition.
+Rewriting it as a three-stage match (high-confidence detections vs. all
+tracks, then low-confidence detections recovering tracks stage 1 missed,
+then a loose-IoU "grace period" before spawning a new ID) eliminated the
+inversion and roughly halved mv-fixed's MOTA gap to baseline (findings.md
+#10). mv-adaptive still roughly doubles baseline's max concurrent-stream
+capacity on the same chip at a fixed 25fps/stream quality bar (multi-stream
+and ablation numbers below were measured on YOLOv8n with the pre-fix
+tracker — not rerun since a slower detector only lowers these ceilings,
+it doesn't change the baseline-vs-mv-* comparison):
 
 | Pipeline | max concurrent streams @ >=25fps/stream |
 |---|---|
@@ -42,12 +52,11 @@ change the baseline-vs-mv-* comparison):
 
 ![Multi-stream scaling](results/plots/multistream_scaling.png)
 
-The anchor-interval ablation (mv-fixed at intervals 2/3/5/8/10) surfaced a
-non-obvious result: MOTA rises *monotonically* with anchor interval rather
-than falling — more frequent anchors mean more chances for the detector's
-imperfect recall to cause ID churn, while pure MV propagation never drops a
-track from a missed detection. HOTA/IDF1 peak around interval=5 instead of
-at either extreme.
+The anchor-interval ablation below (mv-fixed at intervals 2/3/5/8/10) is
+the **post-fix** curve: MOTA is now roughly flat across the whole range
+instead of rising monotonically, and HOTA/IDF1 decrease with larger
+intervals as intuition would predict — see `findings.md` #7 and #10 for
+the full before/after story.
 
 ![Anchor interval ablation](results/plots/ablation_anchor_interval.png)
 

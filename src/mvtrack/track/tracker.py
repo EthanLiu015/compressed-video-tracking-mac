@@ -50,6 +50,9 @@ class Track:
 class MVTracker:
     iou_thresh: float = 0.3
     max_age: int = 30
+    high_conf_thresh: float = 0.5  # splits detections into ByteTrack-style high/low buckets
+    iou_thresh_low: float = 0.2  # stage 2: low-conf dets recovering a track, looser gate
+    iou_thresh_grace: float = 0.15  # stage 3: last chance before spawning a new ID
     _next_id: int = field(default=1, init=False)
     _tracks: dict[int, Track] = field(default_factory=dict, init=False)
 
@@ -58,22 +61,66 @@ class MVTracker:
         self._next_id += 1
 
     def step_anchor(self, boxes: np.ndarray, scores: np.ndarray) -> list[Track]:
-        ids = list(self._tracks.keys())
-        track_boxes = np.array([self._tracks[i].box for i in ids]) if ids else np.zeros((0, 4))
-        iou = _iou_matrix(track_boxes, boxes)
+        """Three-stage ByteTrack-style association, replacing a single flat
+        IoU match. A single pass caused real ID churn: any anchor frame
+        where the detector missed a track (common with YOLOv8's imperfect
+        recall) immediately spawned a brand-new identity, and the
+        anchor-interval ablation showed this made *more* anchors hurt MOTA.
 
-        matched_tracks, matched_dets = set(), set()
-        if len(ids) and len(boxes):
+        Stage 1: high-confidence detections vs. all tracks (the original
+          logic, at the original threshold).
+        Stage 2: low-confidence detections (which never spawn new tracks
+          on their own) get a chance to recover tracks stage 1 missed, at
+          a looser IoU gate -- exactly ByteTrack's core idea.
+        Stage 3 (grace period): detections still unmatched after stage 1
+          get one more loose-IoU chance to reattach to a still-unmatched
+          track before falling through to spawning a new ID.
+        Only high-confidence detections ever spawn a new track; unmatched
+        low-confidence ones are discarded as too unreliable to seed an ID.
+        """
+        ids = list(self._tracks.keys())
+        high_idx = np.where(scores >= self.high_conf_thresh)[0]
+        low_idx = np.where(scores < self.high_conf_thresh)[0]
+
+        matched_tracks: set[int] = set()
+        matched_high: set[int] = set()
+
+        def _apply(track_ids, det_idx, thresh):
+            m_tracks, m_dets = set(), set()
+            if not track_ids or len(det_idx) == 0:
+                return m_tracks, m_dets
+            track_boxes = np.array([self._tracks[t].box for t in track_ids])
+            iou = _iou_matrix(track_boxes, boxes[det_idx])
             row, col = linear_sum_assignment(-iou)
             for r, c in zip(row, col):
-                if iou[r, c] >= self.iou_thresh:
-                    tid = ids[r]
-                    self._tracks[tid].box = boxes[c]
-                    self._tracks[tid].score = scores[c]
+                if iou[r, c] >= thresh:
+                    tid = track_ids[r]
+                    di = int(det_idx[c])
+                    self._tracks[tid].box = boxes[di]
+                    self._tracks[tid].score = scores[di]
                     self._tracks[tid].since_detection = 0
                     self._tracks[tid].hits += 1
-                    matched_tracks.add(tid)
-                    matched_dets.add(c)
+                    m_tracks.add(tid)
+                    m_dets.add(di)
+            return m_tracks, m_dets
+
+        # Stage 1: high-confidence detections vs. all tracks.
+        m1_tracks, m1_dets = _apply(ids, high_idx, self.iou_thresh)
+        matched_tracks |= m1_tracks
+        matched_high |= m1_dets
+
+        # Stage 2: low-confidence detections recover tracks stage 1 missed.
+        remaining = [t for t in ids if t not in matched_tracks]
+        _m2_tracks, _m2_dets = _apply(remaining, low_idx, self.iou_thresh_low)
+        matched_tracks |= _m2_tracks
+        # low-conf detections never spawn, so their indices aren't tracked further
+
+        # Stage 3: grace period for still-unmatched high-conf detections.
+        still_unmatched = [t for t in ids if t not in matched_tracks]
+        unmatched_high = np.array([di for di in high_idx if di not in matched_high])
+        m3_tracks, m3_dets = _apply(still_unmatched, unmatched_high, self.iou_thresh_grace)
+        matched_tracks |= m3_tracks
+        matched_high |= m3_dets
 
         for tid in ids:
             if tid not in matched_tracks:
@@ -81,9 +128,9 @@ class MVTracker:
         for tid in [t for t, tr in self._tracks.items() if tr.since_detection > self.max_age]:
             del self._tracks[tid]
 
-        for c in range(len(boxes)):
-            if c not in matched_dets:
-                self._spawn(boxes[c], scores[c])
+        for di in high_idx:
+            if int(di) not in matched_high:
+                self._spawn(boxes[di], scores[di])
 
         return self.active_tracks()
 

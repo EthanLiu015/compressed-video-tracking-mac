@@ -29,6 +29,11 @@ often-static-camera scenes far more than it did on an early low-res smoke
 clip). This is the honest core result: compressed-domain propagation is a
 Pareto tradeoff, not a free win.
 
+**Update**: about half of this MOTA gap turned out to be a fixable
+re-association bug, not an inherent property of MV propagation — see #10.
+Current (YOLOv8s + the fix) numbers: baseline 38.9 vs mv-fixed 26.4 MOTA,
+a ~12.5-point gap instead of the ~22-point gap shown above.
+
 ## 2. Adaptive anchor scheduler (residual-energy proxy)
 
 **What**: `Adaptive` (`src/mvtrack/sched/scheduler.py`) fires anchors on
@@ -46,13 +51,27 @@ with where propagated boxes drift most. Wired as `mv-adaptive`.
 | mv-fixed | 32.0 | 11.3 | 36.0 | 40.2 | 20% |
 | mv-adaptive | 29.3 | 13.3 | 33.7 | 69.8 | ~8% |
 
-**Read**: fires anchors less than half as often yet still beats mv-fixed's
-MOTA (13.3 vs 11.3) while nearly doubling throughput (69.8 vs 40.2 fps) —
-the scheduler is finding anchor points that matter more per-anchor than a
-naive fixed interval, which is exactly the claim the adaptive-scheduling
-idea depends on. HOTA and IDF1 are slightly lower than mv-fixed's,
-though — not a strictly dominant win, a different point on the same
-accuracy/throughput curve.
+**Read (original, pre-#10 fix)**: fires anchors less than half as often
+yet still beats mv-fixed's MOTA (13.3 vs 11.3) while nearly doubling
+throughput (69.8 vs 40.2 fps) — the scheduler is finding anchor points
+that matter more per-anchor than a naive fixed interval, which is exactly
+the claim the adaptive-scheduling idea depends on. HOTA and IDF1 are
+slightly lower than mv-fixed's, though — not a strictly dominant win, a
+different point on the same accuracy/throughput curve.
+
+**Update (post-#10 re-association fix + YOLOv8s)**: the MOTA ranking
+flipped. mv-fixed 26.4 vs mv-adaptive 21.8 — mv-fixed is now *better* on
+MOTA (and HOTA/IDF1) despite anchoring 2.5x more often, still at less
+than mv-fixed's throughput advantage disappearing (mv-adaptive is still
+1.6x faster). Plausible explanation: the fixed pipeline's re-association
+fix (stages 2-3) specifically helps *recover* tracks across anchors — a
+benefit that scales with how often anchors happen, so the more-frequent
+fixed-interval schedule gets more chances to benefit from the fix than
+the sparser adaptive schedule does. The `Adaptive` scheduler's own
+thresholds (`min_interval`, `max_interval`, `spike_factor`, `ema_alpha`)
+have never been tuned against real accuracy at all (arbitrary defaults,
+see the follow-on plan) — likely part of why it now trails mv-fixed;
+tuning them is a separate, not-yet-done follow-up.
 
 ## 3. Vectorized MV-grid construction (perf fix, not a new capability)
 
@@ -177,6 +196,11 @@ extreme — a real sweet spot, not a monotone tradeoff. This is the kind of
 result that only shows up by actually running the sweep rather than
 reasoning from intuition about what "more ground truth checks" should do.
 
+**Update (see #10)**: this exact inversion is what motivated a fix to
+`MVTracker.step_anchor`'s re-association logic. After the fix, the
+inversion is gone — kept here as the finding that prompted the fix, not
+as the current state of the pipeline.
+
 ## 8. Side-by-side demo video
 
 **What**: `scripts/make_demo_video.py` renders baseline (full-decode every
@@ -224,17 +248,70 @@ and the mv-* pipelines is unaffected by this change (still the same real
 propagation-drift and ID-churn issues, see findings #1 and #7), just at a
 uniformly higher starting point.
 
+## 10. Fixing anchor re-association resolves the MOTA inversion (biggest single accuracy win)
+
+**What**: finding #7 showed more frequent anchors made MOTA *worse*, not
+better. Root cause read from `MVTracker.step_anchor`: a single-pass
+IoU-Hungarian match with a hard 0.3 threshold spawned a brand-new track ID
+for any unmatched detection, no grace period, no confidence-tiered
+association — so every anchor frame was an independent chance for
+YOLO's imperfect recall to fragment an existing identity. Rewrote it as a
+three-stage ByteTrack-style match (`src/mvtrack/track/tracker.py`):
+(1) high-confidence detections vs. all tracks at the original threshold,
+(2) low-confidence detections (score < 0.5, never spawn on their own) get
+a looser-IoU chance to recover tracks stage 1 missed, (3) detections still
+unmatched after stage 1 get one more loose-IoU "grace period" chance to
+reattach to a still-unmatched track before spawning a new ID. Verified via
+a 5-scenario synthetic sanity script (basic match, low-conf recovery,
+grace reattachment, full-miss spawn, unmatched-low-conf discard) before
+running on real data.
+
+**Metric impact** — the anchor-interval ablation, re-run after the fix
+(YOLOv8s, same 7 sequences):
+
+| interval | HOTA (before→after) | MOTA (before→after) | IDF1 (before→after) | IDs produced (before→after, GT=546) |
+|---|---|---|---|---|
+| 2 | 30.9→37.0 | 1.0→25.5 | 33.6→43.5 | 1458→584 |
+| 3 | 31.7→36.8 | 6.3→25.7 | 35.4→43.7 | 1326→580 |
+| 5 | 32.0→35.7 | 11.3→26.4 | 36.0→42.5 | 1070→545 |
+| 8 | 30.9→34.7 | 13.3→25.1 | 35.3→41.6 | 941→518 |
+| 10 | 31.0→34.3 | 13.5→24.6 | 35.9→41.4 | 1004→514 |
+
+(Before-numbers above are YOLOv8n/pre-fix from #7 for the original
+inversion; the fix itself was tested on top of the YOLOv8s default from
+#9, so some of the HOTA/IDF1 delta reflects both changes together — MOTA's
+qualitative shape change, from monotonically rising to flat, is the signal
+that isolates this fix's effect, since detector quality alone wouldn't
+explain an inversion disappearing.)
+
+**Read**: the inversion is gone. MOTA is now roughly flat (24.6-26.4%)
+across the whole interval range instead of spanning a 25x range, and
+HOTA/IDF1 now decrease with larger intervals as intuition would predict.
+Track-ID counts dropped toward the real count (546) at every interval —
+direct, mechanism-level evidence that ID fragmentation was the actual
+problem, not a coincidental correlation. This was the single biggest
+accuracy win in the whole project: on the full pipeline comparison,
+mv-fixed's MOTA gap to baseline narrowed from ~22 points (11.3 vs 33.3
+originally, both YOLOv8n) to ~12.5 points (26.4 vs 38.9, both YOLOv8s +
+the fix), roughly halving the accuracy cost of the compressed-domain
+approach without touching the core MV propagation idea at all — the win
+came entirely from fixing how detections re-associate with existing
+tracks, a pure software-engineering fix, not a new algorithm.
+
 ## Summary: what actually worked vs. didn't
 
 - **Worked, real and reproducible**: MV propagation for throughput (at a
-  real accuracy cost), adaptive scheduling (better throughput *and*
-  better MOTA than fixed-interval, at similar-ish accuracy elsewhere),
-  the grid-build vectorization (necessary infrastructure fix, not
-  optional), multi-stream scaling advantage (2x concurrent streams for
-  both mv-fixed and mv-adaptive), a genuinely non-obvious ablation
-  result (anchor frequency vs. MOTA is non-monotonic), and confirming
-  detector quality was a real, cheap-to-fix lever separate from the MV
-  approach (YOLOv8n → YOLOv8s raised every pipeline's accuracy).
+  real accuracy cost, though substantially narrowed later), adaptive
+  scheduling for throughput (still 1.6x faster than fixed-interval after
+  #10, though it no longer wins on MOTA — see #2's update), the grid-build
+  vectorization (necessary infrastructure fix, not optional), multi-stream
+  scaling advantage (2x concurrent streams for both mv-fixed and
+  mv-adaptive), confirming detector quality was a real, cheap-to-fix lever
+  separate from the MV approach (#9), and — the single biggest accuracy
+  win in the project — fixing anchor re-association to eliminate a real,
+  measured ID-churn problem that had been making more-frequent anchors
+  actively *hurt* MOTA (#10), roughly halving mv-fixed's MOTA gap to
+  baseline without changing the core MV propagation idea at all.
 - **Didn't work, but rigorously diagnosed**: learned box correction.
   Root-caused a real distribution-mismatch bug, fixed it with a
   principled method (DAgger), validated the fix's partial effect with

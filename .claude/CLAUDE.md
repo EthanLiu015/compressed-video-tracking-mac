@@ -81,23 +81,33 @@ scripts/     # data prep, demos, smoke tests
 
 ## Results (MOT17 train, all 7 FRCNN sequences, person-class only)
 
-**Current default detector: YOLOv8s** (`weights="yolov8s.pt"`, default in
-`Detector` and `eval/run.py --weights`). Confirmed via a direct ceiling
-check that detector quality was a real, separate lever from the MV
-propagation approach — swapping YOLOv8n -> YOLOv8s raised every pipeline's
-accuracy with only a modest fps cost (much smaller for the mv-* pipelines
-than for baseline, since they only run the detector on a fraction of
-frames):
+**Current defaults: YOLOv8s detector + three-stage ByteTrack-style
+re-association in `MVTracker.step_anchor`.** Both changes came from a
+follow-on accuracy-improvement pass (plan in
+`~/.claude/plans/breezy-knitting-dragon.md`, "Follow-on" section) that
+started from the observation that MOTA was hit far harder than HOTA/IDF1
+across every mv-* pipeline:
 
 | Pipeline | HOTA | MOTA | IDF1 | mean fps |
 |---|---|---|---|---|
 | baseline (full decode+detect every frame) | 40.5 | 38.9 | 48.6 | 20.8 |
-| mv-fixed (anchor every 5th frame) | 34.7 | 13.8 | 39.9 | 37.8 |
-| mv-adaptive (~8% anchor rate) | 32.2 | 16.3 | 37.5 | 63.6 |
-| mv-learned v2 (mv-fixed + CorrectionNet, DAgger rollout training) | 33.2 | 11.2 | 38.4 | 32.6 |
+| mv-fixed (anchor every 5th frame) | 35.7 | 26.4 | 42.5 | 38.5 |
+| mv-adaptive (~8% anchor rate) | 32.5 | 21.8 | 39.1 | 62.9 |
+| mv-learned v2 (mv-fixed + CorrectionNet, DAgger rollout training) | 34.6 | 25.5 | 41.7 | 33.7 |
 
 <details>
-<summary>Superseded YOLOv8n numbers (kept for reference — see git history for the full swap commit)</summary>
+<summary>Superseded numbers (kept for reference — see git history for the swap/fix commits)</summary>
+
+YOLOv8s, before the re-association fix:
+
+| Pipeline | HOTA | MOTA | IDF1 | mean fps |
+|---|---|---|---|---|
+| baseline | 40.5 | 38.9 | 48.6 | 20.8 |
+| mv-fixed | 34.7 | 13.8 | 39.9 | 37.8 |
+| mv-adaptive | 32.2 | 16.3 | 37.5 | 63.6 |
+| mv-learned v2 | 33.2 | 11.2 | 38.4 | 32.6 |
+
+YOLOv8n, original numbers:
 
 | Pipeline | HOTA | MOTA | IDF1 | mean fps |
 |---|---|---|---|---|
@@ -109,16 +119,52 @@ frames):
 
 </details>
 
-MV propagation is a real accuracy/throughput tradeoff, not a free win —
-MOTA drops hard (baseline ~39% vs mv-fixed/mv-adaptive ~14-16%) because
-propagation drift between anchors hurts more on MOT17's crowded,
-often-static-camera scenes than it did on the low-res smoke-test clip
-used early on. This is the honest core result; report it as-is rather
-than only the throughput number. Note baseline itself (HOTA 40.5) still
-falls short of a well-tuned ByteTrack-on-MOT17 ballpark (~60) — YOLOv8s is
-better than YOLOv8n but still a small/fast model; a larger detector
-(yolov8m/l) or confidence/NMS tuning would likely raise the ceiling
-further at additional throughput cost, not attempted here.
+**What changed and why:** two fixes, in order of impact.
+
+1. **Detector ceiling check** (YOLOv8n -> YOLOv8s): real gains across
+   every pipeline, modest fps cost (see findings.md #9).
+2. **Fixed `MVTracker.step_anchor`'s re-association** — this was the
+   bigger lever. The original single-pass IoU-Hungarian match spawned a
+   brand-new track ID for *any* unmatched detection, and the
+   anchor-interval ablation had shown this actively caused ID churn: more
+   anchors meant more chances for YOLO's imperfect recall to fragment an
+   identity, so MOTA rose *monotonically with anchor interval* (1.0 at
+   interval=2 up to 13.5 at interval=10) instead of falling — the
+   opposite of intuition. Rewrote it as a three-stage ByteTrack-style
+   match: (1) high-confidence detections vs. all tracks at the original
+   IoU threshold, (2) low-confidence detections get a looser-threshold
+   chance to recover tracks stage 1 missed (never spawn on their own),
+   (3) detections still unmatched after stage 1 get one more loose-IoU
+   "grace period" chance to reattach to a still-unmatched track before
+   falling through to spawning a new ID. Verified via a synthetic
+   sanity script (stage-1 basic match, stage-2 low-conf recovery,
+   stage-3 grace reattachment, full-miss spawn, unmatched-low-conf
+   discard) before trusting it on real MOT17.
+
+   Effect on the anchor-interval ablation (mv-fixed, YOLOv8s): the
+   inversion is **gone**. MOTA is now roughly flat (24.6-26.4%) across
+   the whole interval range instead of rising 25x from one end to the
+   other, and HOTA/IDF1 now decrease with larger intervals as intuition
+   would suggest. Track-ID counts also dropped dramatically toward the
+   real ground-truth count (e.g. interval=5: 545 IDs produced vs 546 real
+   ones, down from 941-1458 IDs pre-fix depending on detector/interval) —
+   direct evidence the fragmentation problem is what got fixed, not some
+   unrelated confound. Full before/after ablation table in `findings.md`
+   #7 and #10.
+
+MV propagation is still a real accuracy/throughput tradeoff, not a free
+win — MOTA still trails baseline meaningfully (~39% vs ~22-26% for the
+mv-* pipelines) even after both fixes, because propagation drift between
+anchors is still real. But the gap narrowed substantially (was ~25-28
+points before this pass, now ~13-17). This is the honest core result;
+report it as-is rather than only the throughput number. Note baseline
+itself (HOTA 40.5) still falls short of a well-tuned ByteTrack-on-MOT17
+ballpark (~60) — YOLOv8s is better than YOLOv8n but still a small/fast
+model; a larger detector (yolov8m/l) or confidence/NMS tuning would likely
+raise the ceiling further at additional throughput cost, not attempted
+here. Improving `propagate_boxes` itself (scale correction, robust MV
+statistics) and revisiting CorrectionNet with appearance features remain
+explicitly out of scope for this pass (see the plan file).
 
 **CorrectionNet (weeks 8-10 stretch goal) made things worse, not better,
 even after fixing the diagnosed train/inference mismatch.** v1 (single-step
@@ -152,10 +198,15 @@ confident) if returning to this.
 
 ## Multi-stream throughput (weeks 11-12, local smoke clip, max streams @ >=25fps/stream)
 
-**Measured on YOLOv8n** (predates the detector swap above) — not rerun
-with YOLOv8s since a bigger/slower detector would only lower these
-ceilings, not invalidate the relative baseline-vs-mv-* comparison. Same
-caveat applies to the anchor-interval ablation in `findings.md` #7.
+**Measured on YOLOv8n with the pre-fix single-pass tracker** (predates
+both the detector swap and the re-association fix above) — not rerun
+since a bigger/slower detector would only lower these ceilings, not
+invalidate the relative baseline-vs-mv-* comparison, and the
+re-association fix mainly affects accuracy, not fps. The anchor-interval
+ablation in `findings.md` #7 (also YOLOv8n/pre-fix) has since been
+superseded by a rerun in #10 that shows the fix resolves the "more
+anchors hurt MOTA" inversion; #7 is kept as the finding that motivated
+the fix.
 
 | Pipeline | max streams @ >=25fps | aggregate fps ceiling |
 |---|---|---|
