@@ -13,6 +13,8 @@ dependencies = [
     "tqdm",
     "pandas",
     "matplotlib",
+    "certifi",
+    "trackeval @ git+https://github.com/JonathonLuiten/TrackEval.git",
 ]
 
 [build-system]
