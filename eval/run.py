@@ -34,7 +34,7 @@ RESULTS = ROOT / "outputs" / "results"
 PERSON_CLS = 0  # COCO 'person' in YOLO
 
 
-def run_baseline(video: pathlib.Path, out_txt: pathlib.Path) -> tuple[int, float]:
+def run_baseline(video: pathlib.Path, out_txt: pathlib.Path, **_kwargs) -> tuple[int, float]:
     """Full decode + YOLOv8 + ByteTrack every frame. Returns (frames, seconds)."""
     from ultralytics import YOLO
 
@@ -64,7 +64,41 @@ def run_baseline(video: pathlib.Path, out_txt: pathlib.Path) -> tuple[int, float
     return frames, dt
 
 
-PIPELINES = {"baseline": run_baseline}
+def run_mv_fixed(
+    video: pathlib.Path, out_txt: pathlib.Path, anchor_interval: int = 5, **_kwargs
+) -> tuple[int, float]:
+    """Detector fires every `anchor_interval` frames; MV propagation fills the
+    rest. Frame 1 is always an anchor. Returns (frames, seconds)."""
+    from mvtrack.detect import Detector
+    from mvtrack.extract import iter_frames_with_mvs
+    from mvtrack.track import MVTracker
+
+    detector = Detector("yolov8n.pt")
+    tracker = MVTracker()
+    rows = []
+    frames = 0
+    t0 = time.perf_counter()
+    for fmv, frame in iter_frames_with_mvs(str(video)):
+        frames += 1
+        if frames % anchor_interval == 1:
+            img = frame.to_ndarray(format="bgr24")
+            boxes, scores, cls_ids = detector(img)
+            keep = cls_ids == PERSON_CLS
+            tracks = tracker.step_anchor(boxes[keep], scores[keep])
+        else:
+            tracks = tracker.step_propagate(fmv)
+        for tr in tracks:
+            x0, y0, x1, y1 = tr.box
+            rows.append(
+                f"{frames},{tr.id},{x0:.2f},{y0:.2f},{x1 - x0:.2f},{y1 - y0:.2f},{tr.score:.3f},-1,-1,-1"
+            )
+    dt = time.perf_counter() - t0
+    out_txt.parent.mkdir(parents=True, exist_ok=True)
+    out_txt.write_text("\n".join(rows) + "\n")
+    return frames, dt
+
+
+PIPELINES = {"baseline": run_baseline, "mv-fixed": run_mv_fixed}
 
 
 def write_seqmap(seq_names: list[str], path: pathlib.Path) -> None:
@@ -104,6 +138,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pipeline", choices=PIPELINES, default="baseline")
     ap.add_argument("--seqs", nargs="*", help="e.g. MOT17-02 (default: all)")
+    ap.add_argument("--anchor-interval", type=int, default=5, help="mv-fixed only")
     args = ap.parse_args()
 
     videos = sorted((MOT / "videos").glob("MOT17-*-FRCNN.mp4"))
@@ -117,7 +152,9 @@ def main() -> None:
     for video in videos:
         seq = video.stem  # e.g. MOT17-02-FRCNN — must match GT folder name
         res_txt = out_dir / f"{seq}.txt"
-        frames, dt = PIPELINES[args.pipeline](video, res_txt)
+        frames, dt = PIPELINES[args.pipeline](
+            video, res_txt, anchor_interval=args.anchor_interval
+        )
         fps = frames / dt
         fps_all.append(fps)
         seq_names.append(seq)

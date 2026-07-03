@@ -53,6 +53,10 @@ scripts/     # data prep, demos, smoke tests
   doesn't yet handle backward-referencing (B-frame) vectors correctly for
   all cases. `MOT17` sequences should be encoded the same way
   (`scripts/prep_mot17.py` already does this).
+- **fps run-to-run variance**: single-run fps numbers on MPS vary
+  noticeably between runs (model load/warmup, thermal state). Don't trust
+  a single measurement for the accuracy/throughput Pareto curves — average
+  a few runs once that ablation is built.
 
 ## Working conventions
 
