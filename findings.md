@@ -340,6 +340,49 @@ possible lever in this entire project and had the second-largest impact
 after #10 — a reminder that tuning already-correct code can matter as
 much as fixing broken code.
 
+## 12. Per-edge scale correction in propagate_boxes — negative result
+
+**What**: after #10/#11 closed most of the ID-churn/scheduling gap, the
+remaining MOTA gap to baseline turned out to be flat across anchor
+frequency (mv-fixed at interval=2, 50% anchor rate, still only hit MOTA
+25.5 — barely above interval=5's 26.4), proving the residual gap wasn't a
+scheduling problem. `propagate_boxes` only ever did rigid translation
+(one whole-box median MV shift, width/height never change) — a plausible
+next lever, since MOT17 subjects walking toward/away from the camera
+should drift in scale with no correction. Rewrote it to shift each edge
+independently by the *local* median MV near that edge (left/right bands
+for x0/x1, top/bottom bands for y0/y1) instead of one global median, which
+captures scale change for free without an explicit scale-factor estimate.
+Verified via 5 synthetic scenarios first (uniform field -> pure
+translation preserved exactly, diverging field -> box grows, converging
+field -> box shrinks, narrow box doesn't invert, zero-coverage box
+unchanged) before running on real data.
+
+**Metric impact**:
+
+| Pipeline | HOTA (before→after) | MOTA (before→after) | IDF1 (before→after) |
+|---|---|---|---|
+| mv-fixed (interval=5) | 35.73→36.00 | 26.38→25.60 | 42.47→42.96 |
+| mv-adaptive (tuned) | 35.40→35.19 | 25.42→24.81 | 42.71→42.43 |
+
+**Read**: flat-to-slightly-negative on the metric that matters most
+(MOTA down in both pipelines), mixed/marginal on HOTA and IDF1. Reverted
+rather than adopted. Likely explanation: MOT17 pedestrians mostly move
+laterally across the frame rather than directly toward/away from the
+camera, so scale drift may not be the dominant real error mode in this
+dataset — while the per-edge bands (roughly 1-2 of the already-coarse
+16px cells wide, since typical pedestrian boxes span only a few cells)
+are small enough that their median estimates are noisier than the
+whole-box median, adding box-size jitter that costs more localization
+precision than the occasional real scale correction saves. Same shape of
+result as CorrectionNet (#4): a mechanistically sound idea, carefully
+implemented and verified, that simply didn't survive contact with real
+data — reported here rather than either silently dropped or kept despite
+a net-negative measurement. Would need either coarser/more robust
+per-edge statistics or a way to detect when scale-change is actually
+happening (e.g. from box-size trend over recent anchors) before applying
+the correction selectively, rather than unconditionally on every box.
+
 ## Summary: what actually worked vs. didn't
 
 - **Worked, real and reproducible**: MV propagation for throughput (at a
@@ -362,3 +405,9 @@ much as fixing broken code.
   nothing) rather than stopping at the first improvement that looked
   good on a proxy metric (MSE) without checking the metric that
   actually matters (tracking accuracy).
+- **Didn't work, reverted rather than kept**: per-edge scale correction in
+  `propagate_boxes` (#12). A mechanistically reasonable idea (translation
+  couldn't capture scale drift), verified correct on 5 synthetic scenarios,
+  measured flat-to-slightly-negative on real MOT17 (MOTA down in both
+  mv-fixed and mv-adaptive) — reverted to the original rather than kept
+  for a mixed-at-best result, the same discipline applied to CorrectionNet.

@@ -192,9 +192,15 @@ itself (HOTA 40.5) still falls short of a well-tuned ByteTrack-on-MOT17
 ballpark (~60) — YOLOv8s is better than YOLOv8n but still a small/fast
 model; a larger detector (yolov8m/l) or confidence/NMS tuning would likely
 raise the ceiling further at additional throughput cost, not attempted
-here. Improving `propagate_boxes` itself (scale correction, robust MV
-statistics) and revisiting CorrectionNet with appearance features remain
-explicitly out of scope for this pass (see the plan file).
+here. Tried per-edge scale correction in `propagate_boxes` as a further
+lever (shift each box edge by local rather than whole-box median MV,
+capturing scale drift with no explicit scale factor) — verified correct
+via 5 synthetic scenarios, but measured flat-to-slightly-negative on real
+MOT17 (MOTA down in both mv-fixed and mv-adaptive) and reverted; see
+findings.md #12. Revisiting CorrectionNet with appearance features
+remains out of scope, and mv-fixed at very short anchor intervals (2-3)
+also confirmed the residual gap isn't a scheduling problem — MOTA is flat
+~25-26% at interval 2, 3, and 5 alike.
 
 **CorrectionNet (weeks 8-10 stretch goal) made things worse, not better,
 even after fixing the diagnosed train/inference mismatch.** v1 (single-step
