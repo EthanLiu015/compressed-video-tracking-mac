@@ -1,5 +1,5 @@
 pipeline,hota,mota,idf1,mean_fps
 baseline,40.456,38.868,48.55,20.8
 mv-fixed,35.73,26.377,42.465,38.5
-mv-adaptive,32.454,21.779,39.06,62.9
+mv-adaptive,35.401,25.421,42.709,44.2
 mv-learned-v2,34.564,25.539,41.662,33.7

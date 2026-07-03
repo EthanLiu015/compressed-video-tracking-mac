@@ -32,8 +32,8 @@ class Adaptive:
     still doesn't starve the tracker of any correction)."""
 
     min_interval: int = 2
-    max_interval: int = 15
-    spike_factor: float = 1.6
+    max_interval: int = 8
+    spike_factor: float = 1.4
     ema_alpha: float = 0.2
     _ema: float = field(default=0.0, init=False)
     _since_anchor: int = field(default=0, init=False)

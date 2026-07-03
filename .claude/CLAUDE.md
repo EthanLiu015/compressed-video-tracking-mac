@@ -82,8 +82,9 @@ scripts/     # data prep, demos, smoke tests
 ## Results (MOT17 train, all 7 FRCNN sequences, person-class only)
 
 **Current defaults: YOLOv8s detector + three-stage ByteTrack-style
-re-association in `MVTracker.step_anchor`.** Both changes came from a
-follow-on accuracy-improvement pass (plan in
+re-association in `MVTracker.step_anchor` + tuned `Adaptive` scheduler
+params (`max_interval=8, spike_factor=1.4`, was `15, 1.6`).** All three
+changes came from a follow-on accuracy-improvement pass (plan in
 `~/.claude/plans/breezy-knitting-dragon.md`, "Follow-on" section) that
 started from the observation that MOTA was hit far harder than HOTA/IDF1
 across every mv-* pipeline:
@@ -92,11 +93,18 @@ across every mv-* pipeline:
 |---|---|---|---|---|
 | baseline (full decode+detect every frame) | 40.5 | 38.9 | 48.6 | 20.8 |
 | mv-fixed (anchor every 5th frame) | 35.7 | 26.4 | 42.5 | 38.5 |
-| mv-adaptive (~8% anchor rate) | 32.5 | 21.8 | 39.1 | 62.9 |
+| mv-adaptive (~15-17% anchor rate, tuned) | 35.4 | 25.4 | 42.7 | 44.2 |
 | mv-learned v2 (mv-fixed + CorrectionNet, DAgger rollout training) | 34.6 | 25.5 | 41.7 | 33.7 |
 
 <details>
 <summary>Superseded numbers (kept for reference — see git history for the swap/fix commits)</summary>
+
+YOLOv8s + re-association fix, before scheduler tuning (mv-adaptive still
+on untuned `max_interval=15, spike_factor=1.6`):
+
+| Pipeline | HOTA | MOTA | IDF1 | mean fps |
+|---|---|---|---|---|
+| mv-adaptive | 32.5 | 21.8 | 39.1 | 62.9 |
 
 YOLOv8s, before the re-association fix:
 
@@ -119,7 +127,7 @@ YOLOv8n, original numbers:
 
 </details>
 
-**What changed and why:** two fixes, in order of impact.
+**What changed and why:** three fixes, in order of impact.
 
 1. **Detector ceiling check** (YOLOv8n -> YOLOv8s): real gains across
    every pipeline, modest fps cost (see findings.md #9).
@@ -152,11 +160,33 @@ YOLOv8n, original numbers:
    unrelated confound. Full before/after ablation table in `findings.md`
    #7 and #10.
 
+   One side effect worth flagging: this fix flipped the mv-fixed vs
+   mv-adaptive MOTA ranking (mv-adaptive used to win, 13.3 vs 11.3;
+   mv-fixed now wins pre-tuning, 26.4 vs 21.8) — plausible explanation is
+   that re-association recovery benefits scale with how often anchors
+   happen, so the denser fixed-interval schedule got more chances to
+   benefit than the sparser untuned adaptive one. See item 3.
+
+3. **Tuned the `Adaptive` scheduler's parameters against real MOTA**
+   (`scripts/tune_scheduler.py`) — a 16-combination grid search on 2 fast
+   tuning sequences (MOT17-09, MOT17-10), holding `min_interval=2` and
+   `ema_alpha=0.2` fixed and sweeping `max_interval` in {8,10,15,20} x
+   `spike_factor` in {1.2,1.4,1.6,2.0}. `max_interval` was the dominant
+   lever by far — MOTA fell monotonically as `max_interval` grew (27.9 at
+   8 down to ~20 at 20) — i.e. anchoring more often just helped a lot
+   post-fix, unsurprising since re-association can now actually recover
+   from a miss instead of always fragmenting. Winner: `max_interval=8,
+   spike_factor=1.4` (from `15, 1.6`), validated on the full 7 sequences:
+   HOTA 32.5->35.4, MOTA 21.8->25.4, IDF1 39.1->42.7, at a real fps cost
+   (62.9->44.2, anchor rate ~8%->~15-17%) — this restores mv-adaptive to
+   roughly matching mv-fixed (35.4/25.4/42.7 vs 35.7/26.4/42.5) while
+   still being meaningfully faster (44.2 vs 38.5 fps).
+
 MV propagation is still a real accuracy/throughput tradeoff, not a free
-win — MOTA still trails baseline meaningfully (~39% vs ~22-26% for the
-mv-* pipelines) even after both fixes, because propagation drift between
-anchors is still real. But the gap narrowed substantially (was ~25-28
-points before this pass, now ~13-17). This is the honest core result;
+win — MOTA still trails baseline meaningfully (~39% vs ~25-26% for the
+mv-* pipelines) even after all three fixes, because propagation drift
+between anchors is still real. But the gap narrowed substantially (was
+~25-28 points before this pass, now ~13-14). This is the honest core result;
 report it as-is rather than only the throughput number. Note baseline
 itself (HOTA 40.5) still falls short of a well-tuned ByteTrack-on-MOT17
 ballpark (~60) — YOLOv8s is better than YOLOv8n but still a small/fast

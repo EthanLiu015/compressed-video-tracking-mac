@@ -16,14 +16,15 @@ All numbers are on real MOT17 train ground truth (7 FRCNN sequences),
 YOLOv8s person-class detector (the project default — a ceiling check
 confirmed YOLOv8n was leaving real accuracy on the table across every
 pipeline) plus a fixed three-stage ByteTrack-style re-association in
-`MVTracker` (see below). Full detail and honest negative results in
-`findings.md`; per-session narrative in `.claude/CLAUDE.md`.
+`MVTracker` and a tuned `Adaptive` scheduler (see below). Full detail and
+honest negative results in `findings.md`; per-session narrative in
+`.claude/CLAUDE.md`.
 
 | Pipeline | HOTA | MOTA | IDF1 | mean fps |
 |---|---|---|---|---|
 | baseline (full decode + detect every frame) | 40.5 | 38.9 | 48.6 | 20.8 |
 | mv-fixed (anchor every 5th frame) | 35.7 | 26.4 | 42.5 | 38.5 |
-| mv-adaptive (residual-energy-proxy scheduler, ~8% anchor rate) | 32.5 | 21.8 | 39.1 | 62.9 |
+| mv-adaptive (residual-energy-proxy scheduler, tuned, ~15-17% anchor rate) | 35.4 | 25.4 | 42.7 | 44.2 |
 | mv-learned (mv-fixed + learned box correction) | 34.6 | 25.5 | 41.7 | 33.7 |
 
 ![HOTA/MOTA vs throughput](results/plots/pipeline_pareto.png)
@@ -38,7 +39,11 @@ Rewriting it as a three-stage match (high-confidence detections vs. all
 tracks, then low-confidence detections recovering tracks stage 1 missed,
 then a loose-IoU "grace period" before spawning a new ID) eliminated the
 inversion and roughly halved mv-fixed's MOTA gap to baseline (findings.md
-#10). mv-adaptive still roughly doubles baseline's max concurrent-stream
+#10). That fix also made anchors more valuable, so `Adaptive`'s untuned
+defaults were now anchoring too rarely — a 16-combination grid search
+against real MOTA (`scripts/tune_scheduler.py`, findings.md #11) restored
+mv-adaptive to matching mv-fixed's accuracy while staying faster.
+mv-adaptive still roughly doubles baseline's max concurrent-stream
 capacity on the same chip at a fixed 25fps/stream quality bar (multi-stream
 and ablation numbers below were measured on YOLOv8n with the pre-fix
 tracker — not rerun since a slower detector only lowers these ceilings,
@@ -109,6 +114,7 @@ python eval/run.py --pipeline mv-fixed --anchor-interval 5
 python eval/run.py --pipeline mv-adaptive
 python eval/run.py --pipeline mv-learned --correction-checkpoint correction_net_v2.pt
 python eval/run.py --pipeline baseline --weights yolov8n.pt   # compare against the old default
+python scripts/tune_scheduler.py           # grid-search Adaptive's params against real MOTA
 ```
 
 ## Learned box correction (optional, stretch goal)

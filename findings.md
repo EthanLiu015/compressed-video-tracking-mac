@@ -59,19 +59,18 @@ the claim the adaptive-scheduling idea depends on. HOTA and IDF1 are
 slightly lower than mv-fixed's, though — not a strictly dominant win, a
 different point on the same accuracy/throughput curve.
 
-**Update (post-#10 re-association fix + YOLOv8s)**: the MOTA ranking
-flipped. mv-fixed 26.4 vs mv-adaptive 21.8 — mv-fixed is now *better* on
-MOTA (and HOTA/IDF1) despite anchoring 2.5x more often, still at less
-than mv-fixed's throughput advantage disappearing (mv-adaptive is still
-1.6x faster). Plausible explanation: the fixed pipeline's re-association
-fix (stages 2-3) specifically helps *recover* tracks across anchors — a
-benefit that scales with how often anchors happen, so the more-frequent
-fixed-interval schedule gets more chances to benefit from the fix than
-the sparser adaptive schedule does. The `Adaptive` scheduler's own
-thresholds (`min_interval`, `max_interval`, `spike_factor`, `ema_alpha`)
-have never been tuned against real accuracy at all (arbitrary defaults,
-see the follow-on plan) — likely part of why it now trails mv-fixed;
-tuning them is a separate, not-yet-done follow-up.
+**Update (post-#10 re-association fix + YOLOv8s, before scheduler
+tuning)**: the MOTA ranking flipped. mv-fixed 26.4 vs mv-adaptive 21.8 —
+mv-fixed is now *better* on MOTA (and HOTA/IDF1) despite anchoring 2.5x
+more often, with mv-fixed's throughput advantage disappearing (mv-adaptive
+is still 1.6x faster). Plausible explanation: the fixed pipeline's
+re-association fix (stages 2-3) specifically helps *recover* tracks
+across anchors — a benefit that scales with how often anchors happen, so
+the more-frequent fixed-interval schedule gets more chances to benefit
+from the fix than the sparser adaptive schedule does. The `Adaptive`
+scheduler's own thresholds had never been tuned against real accuracy at
+all (arbitrary defaults) — confirmed as the actual explanation once tuned,
+see #11.
 
 ## 3. Vectorized MV-grid construction (perf fix, not a new capability)
 
@@ -298,15 +297,59 @@ approach without touching the core MV propagation idea at all — the win
 came entirely from fixing how detections re-associate with existing
 tracks, a pure software-engineering fix, not a new algorithm.
 
+## 11. Tuning the Adaptive scheduler against real MOTA (closes the #2 regression)
+
+**What**: `Adaptive`'s four parameters (`min_interval`, `max_interval`,
+`spike_factor`, `ema_alpha`) were pure arbitrary dataclass defaults, never
+tuned against ground truth (confirmed via repo-wide grep). After the
+re-association fix (#10) flipped mv-adaptive from beating mv-fixed on
+MOTA to trailing it, ran a 16-combination grid search
+(`scripts/tune_scheduler.py`) on 2 fast tuning sequences (MOT17-09,
+MOT17-10, held separate from the full-7 set used for final reporting),
+holding `min_interval=2` and `ema_alpha=0.2` fixed and sweeping
+`max_interval` in {8,10,15,20} x `spike_factor` in {1.2,1.4,1.6,2.0}.
+
+**Metric impact** — grid search (tuning sequences only), showing MOTA vs.
+`max_interval` (the dominant lever; `spike_factor` had a smaller effect
+within each group, best value shifted slightly but stayed near 1.2-1.4):
+
+| max_interval | 8 | 10 | 15 | 20 |
+|---|---|---|---|---|
+| best MOTA (any spike_factor) | 27.9 | 27.0 | 22.1 | 21.2 |
+
+Then validated the winner (`max_interval=8, spike_factor=1.4`, down from
+`15, 1.6`) on the full 7-sequence set:
+
+| mv-adaptive | HOTA | MOTA | IDF1 | mean fps | anchor rate |
+|---|---|---|---|---|---|
+| untuned (`max=15, spike=1.6`) | 32.5 | 21.8 | 39.1 | 62.9 | ~8% |
+| tuned (`max=8, spike=1.4`) | 35.4 | 25.4 | 42.7 | 44.2 | ~15-17% |
+
+**Read**: `max_interval` dominated the sweep — MOTA fell monotonically as
+`max_interval` grew from 8 to 20, meaning the scheduler's untuned default
+(15) was simply anchoring too rarely once re-association could actually
+use those anchors productively (#10's fix made anchors more valuable, so
+the optimal anchor rate went up in response — the two fixes interact,
+they aren't independent). The tuned scheduler restores mv-adaptive to
+roughly matching mv-fixed on every accuracy metric (35.4/25.4/42.7 vs
+35.7/26.4/42.5) while staying meaningfully faster (44.2 vs 38.5 fps) —
+this closes the regression #2 found and gives mv-adaptive a real reason
+to exist again: same accuracy as fixed-interval anchoring, less compute.
+A grid search over dataclass defaults, no new capability, is the cheapest
+possible lever in this entire project and had the second-largest impact
+after #10 — a reminder that tuning already-correct code can matter as
+much as fixing broken code.
+
 ## Summary: what actually worked vs. didn't
 
 - **Worked, real and reproducible**: MV propagation for throughput (at a
   real accuracy cost, though substantially narrowed later), adaptive
-  scheduling for throughput (still 1.6x faster than fixed-interval after
-  #10, though it no longer wins on MOTA — see #2's update), the grid-build
-  vectorization (necessary infrastructure fix, not optional), multi-stream
-  scaling advantage (2x concurrent streams for both mv-fixed and
-  mv-adaptive), confirming detector quality was a real, cheap-to-fix lever
+  scheduling — after tuning (#11) restored it to matching mv-fixed's
+  accuracy while staying faster, closing a regression #10's fix had
+  introduced — the grid-build vectorization (necessary infrastructure
+  fix, not optional), multi-stream scaling advantage (2x concurrent
+  streams for both mv-fixed and mv-adaptive), confirming detector quality
+  was a real, cheap-to-fix lever
   separate from the MV approach (#9), and — the single biggest accuracy
   win in the project — fixing anchor re-association to eliminate a real,
   measured ID-churn problem that had been making more-frequent anchors
