@@ -86,12 +86,27 @@ scripts/     # data prep, demos, smoke tests
 | baseline (full decode+detect every frame) | 36.0 | 33.3 | 42.1 | 29.8 |
 | mv-fixed (anchor every 5th frame) | 32.0 | 11.3 | 36.0 | 40.2 |
 | mv-adaptive (~8% anchor rate) | 29.3 | 13.3 | 33.7 | 69.8 |
+| mv-learned (mv-fixed + CorrectionNet) | 31.1 | 7.0 | 34.8 | 34.5 |
 
 MV propagation is a real accuracy/throughput tradeoff, not a free win —
 MOTA drops hard (33→11-13%) because propagation drift between anchors hurts
 more on MOT17's crowded/static-camera scenes than it did on the low-res
 smoke-test clip. This is the honest weeks 5-7 result; report it as-is rather
 than only the throughput number.
+
+**CorrectionNet (weeks 8-10 stretch goal) made things worse, not better** —
+worse on every accuracy metric than plain mv-fixed, and slower (added
+inference cost, no offsetting gain). It beat a "predict zero residual"
+baseline by ~19% MSE in isolated single-step regression (GT box at t -> GT
+box at t+1, held-out sequence), but that didn't transfer to the full
+pipeline. Most likely cause: **train/inference distribution mismatch** —
+training only ever sees one propagation step starting from a perfect GT
+box, but inference chains the net's own corrections across multiple
+already-drifted, already-corrected frames between anchors (same failure
+mode as exposure bias in seq2seq training). Fix would be training on
+multi-step rollouts (feed the net's own output back in during training,
+not just single ground-truth-anchored steps) rather than tuning the
+architecture — noted as a follow-up, not attempted yet.
 
 ## Working conventions
 

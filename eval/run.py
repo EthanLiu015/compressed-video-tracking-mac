@@ -137,7 +137,60 @@ def run_mv_adaptive(
     return frames, dt
 
 
-PIPELINES = {"baseline": run_baseline, "mv-fixed": run_mv_fixed, "mv-adaptive": run_mv_adaptive}
+def run_mv_learned(
+    video: pathlib.Path, out_txt: pathlib.Path, anchor_interval: int = 5, **_kwargs
+) -> tuple[int, float]:
+    """Same as run_mv_fixed but CorrectionNet adjusts each propagated box.
+    Requires outputs/correction_net.pt (scripts/train_correction.py).
+    Returns (frames, seconds)."""
+    import torch
+
+    from mvtrack.detect import Detector, pick_device
+    from mvtrack.extract import iter_frames_with_mvs
+    from mvtrack.track import MVTracker
+    from mvtrack.track.correct import CorrectionNet, apply_correction
+
+    device = pick_device()
+    net = CorrectionNet().to(device)
+    net.load_state_dict(torch.load(ROOT / "outputs" / "correction_net.pt", map_location=device))
+    net.eval()
+
+    detector = Detector("yolov8n.pt")
+    tracker = MVTracker()
+    rows = []
+    frames = 0
+    t0 = time.perf_counter()
+    for fmv, frame in iter_frames_with_mvs(str(video)):
+        frames += 1
+        if frames % anchor_interval == 1:
+            img = frame.to_ndarray(format="bgr24")
+            boxes, scores, cls_ids = detector(img)
+            keep = cls_ids == PERSON_CLS
+            tracks = tracker.step_anchor(boxes[keep], scores[keep])
+        else:
+            tracks = tracker.step_propagate(fmv)
+            if tracks:
+                ids = [t.id for t in tracks]
+                boxes = np.stack([t.box for t in tracks])
+                corrected = apply_correction(net, boxes, fmv, device=device)
+                tracks = tracker.correct_boxes(dict(zip(ids, corrected)))
+        for tr in tracks:
+            x0, y0, x1, y1 = tr.box
+            rows.append(
+                f"{frames},{tr.id},{x0:.2f},{y0:.2f},{x1 - x0:.2f},{y1 - y0:.2f},{tr.score:.3f},-1,-1,-1"
+            )
+    dt = time.perf_counter() - t0
+    out_txt.parent.mkdir(parents=True, exist_ok=True)
+    out_txt.write_text("\n".join(rows) + "\n")
+    return frames, dt
+
+
+PIPELINES = {
+    "baseline": run_baseline,
+    "mv-fixed": run_mv_fixed,
+    "mv-adaptive": run_mv_adaptive,
+    "mv-learned": run_mv_learned,
+}
 
 
 def write_seqmap(seq_names: list[str], path: pathlib.Path) -> None:

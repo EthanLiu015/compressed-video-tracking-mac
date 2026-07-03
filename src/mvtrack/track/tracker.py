@@ -99,5 +99,13 @@ class MVTracker:
             del self._tracks[tid]
         return self.active_tracks()
 
+    def correct_boxes(self, new_boxes: dict[int, np.ndarray]) -> list[Track]:
+        """Overwrite live tracks' boxes (e.g. with a learned correction
+        applied on top of MV propagation). Does not touch since_detection."""
+        for tid, box in new_boxes.items():
+            if tid in self._tracks:
+                self._tracks[tid].box = box
+        return self.active_tracks()
+
     def active_tracks(self) -> list[Track]:
         return list(self._tracks.values())
