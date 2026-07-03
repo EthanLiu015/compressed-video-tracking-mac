@@ -57,6 +57,14 @@ scripts/     # data prep, demos, smoke tests
   noticeably between runs (model load/warmup, thermal state). Don't trust
   a single measurement for the accuracy/throughput Pareto curves — average
   a few runs once that ablation is built.
+- **No decoded residual coefficients via PyAV**: FFmpeg's side-data API
+  exposes motion vectors but not the actual residual/DCT energy. The
+  adaptive scheduler (`sched/scheduler.py`) proxies "residual energy" with
+  `1 - occupancy.mean()` (intra-coded block fraction) plus I-frame/scene-cut
+  detection — intra blocks are exactly the ones the encoder couldn't
+  motion-match, which correlates with real residual energy. Revisit if a
+  stronger signal is needed (would require a custom FFmpeg build or ctypes
+  into libavcodec internals).
 
 ## Working conventions
 

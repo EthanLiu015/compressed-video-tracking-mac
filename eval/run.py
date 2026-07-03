@@ -98,7 +98,46 @@ def run_mv_fixed(
     return frames, dt
 
 
-PIPELINES = {"baseline": run_baseline, "mv-fixed": run_mv_fixed}
+def run_mv_adaptive(
+    video: pathlib.Path, out_txt: pathlib.Path, **_kwargs
+) -> tuple[int, float]:
+    """Same as run_mv_fixed but anchor timing comes from Adaptive (residual-
+    energy-proxy) instead of a fixed interval. Returns (frames, seconds)."""
+    from mvtrack.detect import Detector
+    from mvtrack.extract import iter_frames_with_mvs
+    from mvtrack.sched import Adaptive
+    from mvtrack.track import MVTracker
+
+    detector = Detector("yolov8n.pt")
+    tracker = MVTracker()
+    scheduler = Adaptive()
+    rows = []
+    frames = 0
+    anchors = 0
+    t0 = time.perf_counter()
+    for fmv, frame in iter_frames_with_mvs(str(video)):
+        frames += 1
+        if scheduler.should_anchor(fmv):
+            anchors += 1
+            img = frame.to_ndarray(format="bgr24")
+            boxes, scores, cls_ids = detector(img)
+            keep = cls_ids == PERSON_CLS
+            tracks = tracker.step_anchor(boxes[keep], scores[keep])
+        else:
+            tracks = tracker.step_propagate(fmv)
+        for tr in tracks:
+            x0, y0, x1, y1 = tr.box
+            rows.append(
+                f"{frames},{tr.id},{x0:.2f},{y0:.2f},{x1 - x0:.2f},{y1 - y0:.2f},{tr.score:.3f},-1,-1,-1"
+            )
+    dt = time.perf_counter() - t0
+    out_txt.parent.mkdir(parents=True, exist_ok=True)
+    out_txt.write_text("\n".join(rows) + "\n")
+    print(f"  anchor rate: {anchors}/{frames} ({100 * anchors / frames:.1f}%)")
+    return frames, dt
+
+
+PIPELINES = {"baseline": run_baseline, "mv-fixed": run_mv_fixed, "mv-adaptive": run_mv_adaptive}
 
 
 def write_seqmap(seq_names: list[str], path: pathlib.Path) -> None:
