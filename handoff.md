@@ -43,7 +43,16 @@ of truth going forward).
   `results/demo_side_by_side.mp4`) — baseline vs. mv-adaptive, same
   detector and tracker logic, anchor frames highlighted.
 
-Everything is committed; 14 commits on `main`, working tree clean as of
+- **Follow-on accuracy pass** (after the 14-week plan was "done," user
+  pushed back that real accuracy was still bad): detector ceiling check
+  (YOLOv8n → YOLOv8s, adopted), fixed `MVTracker.step_anchor`'s
+  re-association (three-stage ByteTrack-style match — eliminated a real
+  bug where more anchors were making MOTA *worse*), and tuned the
+  never-tuned `Adaptive` scheduler against real MOTA (grid search, new
+  defaults adopted). See findings.md #9-11 for full detail. Combined
+  effect: mv-fixed's MOTA gap to baseline roughly halved (~22pts → ~12.5).
+
+Everything is committed; 18 commits on `main`, working tree clean as of
 this handoff.
 
 ## Current State
@@ -94,6 +103,20 @@ this handoff.
 - **Security**: user's Kaggle API token was moved to the standard
   `~/.kaggle/kaggle.json` location (not left in-repo even gitignored) and
   `kaggle.json` added defensively to `.gitignore`.
+- **YOLOv8s over YOLOv8n as the project-wide default** — a direct ceiling
+  check showed YOLOv8n was leaving real accuracy on the table across every
+  pipeline; adopted rather than just noted, with `--weights` kept as a CLI
+  override for comparison.
+- **Three-stage ByteTrack-style re-association over the original
+  single-pass IoU match** in `MVTracker.step_anchor` — the single-pass
+  version had a real, measured bug (more anchors making MOTA worse); fixed
+  with high-conf/low-conf/grace-period stages rather than just tuning the
+  existing IoU threshold, since the root cause was structural (no recovery
+  path for a missed detection), not a threshold miscalibration.
+- **Grid search over hand-picking scheduler defaults** — `Adaptive`'s four
+  params had never been tuned at all; a small grid search against real
+  MOTA (not a proxy) on 2 held-out-from-final-reporting sequences found
+  the winner cheaply rather than guessing.
 
 ## Touched Files (all committed)
 
@@ -120,9 +143,10 @@ scripts/
   bench_multistream.py                     # multi-stream sweep + optional powermetrics
   make_plots.py                            # regenerates results/plots/*.png from results/*.csv
   make_demo_video.py                       # side-by-side baseline vs mv-adaptive demo
+  tune_scheduler.py                        # grid-search Adaptive's params against real MOTA
 results/
   bench_multistream_{baseline,mv-fixed,mv-adaptive}.csv
-  ablation_anchor_interval.csv, pipeline_comparison.csv
+  ablation_anchor_interval.csv, pipeline_comparison.csv, scheduler_tune.csv
   plots/{pipeline_pareto,ablation_anchor_interval,multistream_scaling}.png
   demo_side_by_side.mp4
 handoff.md, findings.md                    # this file and the metrics writeup
@@ -142,18 +166,28 @@ Not committed (gitignored, regeneratable): `data/`, `outputs/`
 
 ## Next Steps
 
-The 14-week plan is complete. What's left is optional polish, not core scope:
+Both the 14-week plan and the follow-on accuracy pass are complete. What's
+left is optional polish, not core scope:
 
-- **Optional**: revisit CorrectionNet with appearance features or a
-  per-track confidence gate if the accuracy gap vs. mv-fixed is worth
-  closing — current read is that MV/occupancy-only features are
-  under-powered for this correction task (see findings.md #4-5).
+- **Optional**: `mv-learned`'s CorrectionNet still slightly trails
+  mv-fixed on every metric even after re-testing on top of both fixes
+  (findings.md #4-5, #10, #11 don't change this verdict) — would need
+  appearance features or a confidence gate to plausibly close, not
+  attempted.
+- **Optional**: improve `propagate_boxes` itself (scale correction for
+  subjects moving toward/away from camera, robust MV statistics instead
+  of plain median) — explicitly out of scope for the follow-on pass, the
+  next lever if more accuracy is wanted without new modalities.
 - **Optional**: set up `powermetrics` passwordless sudo if real energy
   numbers (not just fps) are wanted for the multi-stream Pareto plot.
 - **Optional**: extend the ablation to UA-DETRAC (vehicles, per the
   original plan's dataset list) if a second domain is wanted for
   robustness — not attempted, MOT17 alone was the whole plan's dataset in
   practice.
+- **Optional**: multi-stream and anchor-interval-ablation numbers in
+  `results/` still reflect the pre-fix tracker/YOLOv8n — rerunning them
+  would give a fully consistent picture, but wasn't required since the
+  qualitative comparisons (baseline vs mv-*) still hold.
 - **Known rough edge**: a hung multi-stream sweep process once occurred
   (see CLAUDE.md gotcha) — not root-caused, workaround (kill + rerun) is
   documented, low priority unless it recurs.
