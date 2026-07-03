@@ -9,3 +9,4 @@ runs/
 *.pt
 *.mlpackage
 .claude/settings.local.json
+kaggle.json

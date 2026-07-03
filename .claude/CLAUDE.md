@@ -44,10 +44,13 @@ scripts/     # data prep, demos, smoke tests
   harness, a tiny synthetic gt+result pair scoring 100% is a fast way to
   isolate config bugs from data bugs (that's how the numpy shim above was
   found — no need to wait on a real dataset download to test the plumbing).
-- **motchallenge.net**: has been unreachable (TCP connect timeout to
-  131.159.19.34, both IPv4/IPv6) across multiple sessions. Not a local
-  network issue — DNS resolves fine, other hosts reachable. Retry later, or
-  find a mirror before assuming the harness code is broken.
+- **motchallenge.net**: unreachable (TCP connect timeout to 131.159.19.34,
+  both IPv4/IPv6) across 4+ sessions — not a local network issue. Use the
+  Kaggle mirror instead: `kaggle datasets download -d wenhoujinjust/mot-17`
+  (needs `~/.kaggle/kaggle.json`, a free Kaggle account + API token — Settings
+  → API → Create New Token). Matches the official directory layout exactly,
+  so `scripts/prep_mot17.py` works unmodified against the unzipped result
+  once renamed to `data/MOT17.zip`.
 - **Test clips**: `scripts/get_test_clip.py` re-encodes to baseline-profile
   H.264 (`-bf 0`, no B-frames) deliberately — the MV propagation code
   doesn't yet handle backward-referencing (B-frame) vectors correctly for
@@ -57,6 +60,16 @@ scripts/     # data prep, demos, smoke tests
   noticeably between runs (model load/warmup, thermal state). Don't trust
   a single measurement for the accuracy/throughput Pareto curves — average
   a few runs once that ablation is built.
+- **MV-grid build cost scales with resolution**: `_frame_mv`'s original
+  implementation looped in Python over every MV to paint grid cells — fine
+  on a low-res smoke clip, but at MOT17's 1920x1080 (~9k MVs/frame) it cost
+  22ms/frame, *more than decode itself* (7.7ms/frame), which is why an
+  early mv-fixed/mv-adaptive throughput win on the smoke clip didn't
+  reproduce on real MOT17 data. Fixed by vectorizing to a scatter
+  assignment (H.264 partition shapes always tile within one 16px-aligned
+  macroblock, so every MV maps to exactly one grid cell — no need to paint
+  a range). Verified bit-identical output against the old loop on 200 real
+  frames before trusting it. Now 0.63ms/frame; decode dominates.
 - **No decoded residual coefficients via PyAV**: FFmpeg's side-data API
   exposes motion vectors but not the actual residual/DCT energy. The
   adaptive scheduler (`sched/scheduler.py`) proxies "residual energy" with
@@ -65,6 +78,20 @@ scripts/     # data prep, demos, smoke tests
   motion-match, which correlates with real residual energy. Revisit if a
   stronger signal is needed (would require a custom FFmpeg build or ctypes
   into libavcodec internals).
+
+## Results (MOT17 train, all 7 FRCNN sequences, YOLOv8n person-class only)
+
+| Pipeline | HOTA | MOTA | IDF1 | mean fps |
+|---|---|---|---|---|
+| baseline (full decode+detect every frame) | 36.0 | 33.3 | 42.1 | 29.8 |
+| mv-fixed (anchor every 5th frame) | 32.0 | 11.3 | 36.0 | 40.2 |
+| mv-adaptive (~8% anchor rate) | 29.3 | 13.3 | 33.7 | 69.8 |
+
+MV propagation is a real accuracy/throughput tradeoff, not a free win —
+MOTA drops hard (33→11-13%) because propagation drift between anchors hurts
+more on MOT17's crowded/static-camera scenes than it did on the low-res
+smoke-test clip. This is the honest weeks 5-7 result; report it as-is rather
+than only the throughput number.
 
 ## Working conventions
 
