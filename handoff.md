@@ -9,7 +9,7 @@ of truth going forward).
 
 ## Accomplishments
 
-Weeks 1-12 of the 14-week plan are done:
+**All 14 weeks of the plan are done.**
 
 - **Weeks 1-2**: repo scaffold, PyAV motion-vector extraction (bitstream →
   MV grid, no full pixel reconstruction needed beyond what FFmpeg does for
@@ -32,10 +32,19 @@ Weeks 1-12 of the 14-week plan are done:
   result, documented rather than hidden.
 - **Weeks 11-12**: multi-stream throughput harness
   (`scripts/bench_multistream.py`), sweeping concurrent pipeline instances
-  on the M4 until per-stream fps drops below a 25fps target.
+  on the M4 until per-stream fps drops below a 25fps target. Pinned all
+  three pipelines' max-streams ceiling (baseline 4, mv-fixed 8, mv-adaptive
+  8 — mv-fixed's was left unresolved earlier, now confirmed).
+- **Weeks 13-14**: anchor-interval ablation sweep (mv-fixed at intervals
+  2/3/5/8/10 — surfaced a non-obvious finding, see findings.md #7),
+  Pareto/ablation/multistream plots (`scripts/make_plots.py`, in
+  `results/plots/`), README rewritten with final results and full usage,
+  and a side-by-side demo video (`scripts/make_demo_video.py`,
+  `results/demo_side_by_side.mp4`) — baseline vs. mv-adaptive, same
+  detector and tracker logic, anchor frames highlighted.
 
-Everything is committed; 8 commits on `main`, working tree clean as of
-this handoff (one in-flight background sweep — see Next Steps).
+Everything is committed; 14 commits on `main`, working tree clean as of
+this handoff.
 
 ## Current State
 
@@ -109,7 +118,14 @@ scripts/
   build_rollout_dataset.py                 # on-policy DAgger rollout pairs
   train_correction.py                      # trains CorrectionNet on 1+ datasets
   bench_multistream.py                     # multi-stream sweep + optional powermetrics
-results/bench_multistream_{baseline,mv-fixed,mv-adaptive}.csv
+  make_plots.py                            # regenerates results/plots/*.png from results/*.csv
+  make_demo_video.py                       # side-by-side baseline vs mv-adaptive demo
+results/
+  bench_multistream_{baseline,mv-fixed,mv-adaptive}.csv
+  ablation_anchor_interval.csv, pipeline_comparison.csv
+  plots/{pipeline_pareto,ablation_anchor_interval,multistream_scaling}.png
+  demo_side_by_side.mp4
+handoff.md, findings.md                    # this file and the metrics writeup
 ```
 
 Not committed (gitignored, regeneratable): `data/`, `outputs/`
@@ -126,19 +142,18 @@ Not committed (gitignored, regeneratable): `data/`, `outputs/`
 
 ## Next Steps
 
-- **Finish pinning mv-fixed's max-streams ceiling** — the sweep stopped
-  at n=8 (still 27.4 fps, above the 25fps target) because that was the
-  last requested stream count, not because it hit the ceiling. A sweep
-  with n=10, 12 would find the actual crossover
-  (`scripts/bench_multistream.py --pipeline mv-fixed --streams 10 12`).
-- **Weeks 13-14 per the plan**: final ablations, Pareto plots (accuracy
-  vs. throughput vs. streams, using the `results/*.csv` + MOT17 HOTA
-  numbers already in hand), README/report write-up, demo video
-  (side-by-side baseline vs. compressed-domain pipeline with anchor
-  firings visualized).
-- **Optional, not currently planned**: revisit CorrectionNet with
-  appearance features or a per-track confidence gate if the accuracy gap
-  vs. mv-fixed is worth closing — current read is that MV/occupancy-only
-  features are under-powered for this correction task (see findings.md).
+The 14-week plan is complete. What's left is optional polish, not core scope:
+
+- **Optional**: revisit CorrectionNet with appearance features or a
+  per-track confidence gate if the accuracy gap vs. mv-fixed is worth
+  closing — current read is that MV/occupancy-only features are
+  under-powered for this correction task (see findings.md #4-5).
 - **Optional**: set up `powermetrics` passwordless sudo if real energy
-  numbers (not just fps) are wanted for the final Pareto plot.
+  numbers (not just fps) are wanted for the multi-stream Pareto plot.
+- **Optional**: extend the ablation to UA-DETRAC (vehicles, per the
+  original plan's dataset list) if a second domain is wanted for
+  robustness — not attempted, MOT17 alone was the whole plan's dataset in
+  practice.
+- **Known rough edge**: a hung multi-stream sweep process once occurred
+  (see CLAUDE.md gotcha) — not root-caused, workaround (kill + rerun) is
+  documented, low priority unless it recurs.
