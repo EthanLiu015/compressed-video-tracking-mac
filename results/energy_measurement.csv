@@ -1,0 +1,3 @@
+condition,duration_s,n_samples,cpu_power_mw,gpu_power_mw,combined_power_mw
+idle,8,8,9493.75,137.125,9630.88
+mv-adaptive-full-mot17,150,150,10157.2,505.4,10662.6

@@ -292,12 +292,50 @@ where it died, or the CSV ends up with only the last completed subset.
 processes (spawn, not threads/fork — MPS contexts and GIL contention both
 argue against threads) on the same clip, sweeping stream count until
 per-stream fps drops below 25. Energy sampling via `powermetrics` needs
-passwordless sudo (`sudo -n`); not set up in this environment, so the
-power_mw column in `results/*.csv` is empty — set up a NOPASSWD sudoers
-rule for powermetrics if energy numbers are wanted later (a system change,
-do it yourself rather than having Claude edit sudoers). Results are
+passwordless sudo (`sudo -n`); the automated sweep's `power_mw` column is
+still empty for that reason — a manual one-off measurement was taken
+instead (see below), not integrated into the automated sweep since that
+needs a NOPASSWD sudoers rule (a system change the user made a judgment
+call to skip; the manual path below worked without one). Results are
 committed CSVs (`results/`, NOT gitignored like `outputs/`) so the
 throughput/energy Pareto plots stay reproducible without rerunning.
+
+## Energy measurement (manual, one-off)
+
+`sudo -n` (used by the automated `bench_multistream.py --power` sweep)
+never got passwordless sudo configured, but a manual measurement was still
+possible: macOS caches sudo credentials **per-terminal (tty), not
+globally** by default, so the credential from a `sudo -v` run in the
+user's own terminal never carries over to Claude's separate Bash tool
+session — every attempt at scripting the sudo call from this side failed
+silently (empty output file, no error) until the user just ran
+`sudo powermetrics` directly themselves, redirecting to a file for
+Claude to read afterward. A short (15s) sample overlapping a single-video
+pipeline run showed close to zero signal (GPU power actually *lower*
+during "load" than idle) — likely swamped by `powermetrics` measuring
+total system power, not per-process, plus imprecise start-time overlap
+between the manually-launched pipeline and the manually-launched sampler.
+A long (150s) sample overlapping the full 7-sequence `mv-adaptive` MOT17
+eval gave a real, physically-sensible signal:
+
+| Condition | CPU power | GPU power | Combined |
+|---|---|---|---|
+| Idle (8 samples, 8s) | 9494 mW | 137 mW | 9631 mW |
+| mv-adaptive, full MOT17 (150 samples, 150s) | 10157 mW | 505 mW | 10663 mW |
+| **Delta** | **+7.0%** | **+2.7x** | **+10.7%** |
+
+GPU power nearly tripling under load is the sanity-check signal that
+makes this credible (MPS inference should show up there); the short
+sample's backwards GPU reading was the tell that it was noise, not signal.
+Caveats worth keeping in mind: `powermetrics` measures *total system*
+power (display, background apps, everything), not this process alone, so
+the delta is a reasonable but not perfectly clean estimate of the
+pipeline's own draw; the idle baseline (8s) is much shorter than the load
+sample (150s) and would ideally be re-measured at matching duration; and
+this covers `mv-adaptive` only, not a baseline-vs-mv-* energy comparison
+(would need the same treatment applied to `baseline` and `mv-fixed` for
+the full "streams vs. watts" story the original plan called for). Summary
+in `results/energy_measurement.csv`.
 
 ## Working conventions
 

@@ -19,9 +19,9 @@ default 5).
 vs. full-decode-every-frame `baseline`):
 
 | Pipeline | HOTA | MOTA | IDF1 | mean fps |
-|---|---|---|---|---|
-| baseline | 36.0 | 33.3 | 42.1 | 29.8 |
-| mv-fixed | 32.0 | 11.3 | 36.0 | 40.2 |
+| -------- | ---- | ---- | ---- | -------- |
+| baseline | 36.0 | 33.3 | 42.1 | 29.8     |
+| mv-fixed | 32.0 | 11.3 | 36.0 | 40.2     |
 
 **Read**: real 1.35x throughput, but a genuine accuracy cost (MOTA drops
 hardest — propagation drift between anchors compounds on MOT17's crowded,
@@ -46,10 +46,10 @@ with where propagated boxes drift most. Wired as `mv-adaptive`.
 
 **Metric impact**:
 
-| Pipeline | HOTA | MOTA | IDF1 | mean fps | anchor rate |
-|---|---|---|---|---|---|
-| mv-fixed | 32.0 | 11.3 | 36.0 | 40.2 | 20% |
-| mv-adaptive | 29.3 | 13.3 | 33.7 | 69.8 | ~8% |
+| Pipeline    | HOTA | MOTA | IDF1 | mean fps | anchor rate |
+| ----------- | ---- | ---- | ---- | -------- | ----------- |
+| mv-fixed    | 32.0 | 11.3 | 36.0 | 40.2     | 20%         |
+| mv-adaptive | 29.3 | 13.3 | 33.7 | 69.8     | ~8%         |
 
 **Read (original, pre-#10 fix)**: fires anchors less than half as often
 yet still beats mv-fixed's MOTA (13.3 vs 11.3) while nearly doubling
@@ -61,10 +61,10 @@ different point on the same accuracy/throughput curve.
 
 **Update (post-#10 re-association fix + YOLOv8s, before scheduler
 tuning)**: the MOTA ranking flipped. mv-fixed 26.4 vs mv-adaptive 21.8 —
-mv-fixed is now *better* on MOTA (and HOTA/IDF1) despite anchoring 2.5x
+mv-fixed is now _better_ on MOTA (and HOTA/IDF1) despite anchoring 2.5x
 more often, with mv-fixed's throughput advantage disappearing (mv-adaptive
 is still 1.6x faster). Plausible explanation: the fixed pipeline's
-re-association fix (stages 2-3) specifically helps *recover* tracks
+re-association fix (stages 2-3) specifically helps _recover_ tracks
 across anchors — a benefit that scales with how often anchors happen, so
 the more-frequent fixed-interval schedule gets more chances to benefit
 from the fix than the sparser adaptive schedule does. The `Adaptive`
@@ -76,7 +76,7 @@ see #11.
 
 **What**: the original `_frame_mv` painted each motion vector's grid cells
 in a Python `for` loop. Profiling on real MOT17 (1920x1080, ~9k MVs/frame)
-found this cost 22ms/frame — *more than decode itself* (7.7ms/frame) —
+found this cost 22ms/frame — _more than decode itself_ (7.7ms/frame) —
 which is why an early smoke-clip throughput win didn't reproduce on real
 data. Replaced with vectorized NumPy scatter assignment, since H.264
 partition shapes always tile within one 16px-aligned macroblock (so every
@@ -99,10 +99,10 @@ propagation error from detector error. Wired as `mv-learned`.
 
 **Metric impact (v1, single-step training)**:
 
-| Pipeline | HOTA | MOTA | IDF1 | mean fps |
-|---|---|---|---|---|
-| mv-fixed | 32.0 | 11.3 | 36.0 | 40.2 |
-| mv-learned v1 | 31.1 | 7.0 | 34.8 | 34.5 |
+| Pipeline      | HOTA | MOTA | IDF1 | mean fps |
+| ------------- | ---- | ---- | ---- | -------- |
+| mv-fixed      | 32.0 | 11.3 | 36.0 | 40.2     |
+| mv-learned v1 | 31.1 | 7.0  | 34.8 | 34.5     |
 
 Worse on every accuracy metric, and slower (added inference cost, no
 offsetting gain) — despite beating a "predict zero residual" baseline by
@@ -117,7 +117,7 @@ problem seq2seq models hit with teacher forcing).
 ## 5. Fixing the CorrectionNet mismatch (DAgger-style rollout training)
 
 **What**: `scripts/build_rollout_dataset.py` re-walks real anchor windows
-using the *current trained checkpoint itself* to generate correction
+using the _current trained checkpoint itself_ to generate correction
 targets along its own rollout trajectory — on-policy data, matching
 inference exactly, rather than always resetting to a perfect GT box.
 `train_correction.py` retrains from scratch on the aggregate
@@ -128,11 +128,11 @@ crowded/occluded tracks spiked validation loss 10x between epochs).
 
 **Metric impact**:
 
-| Version | val MSE vs. zero-residual baseline | MOTA | IDF1 | mean fps |
-|---|---|---|---|---|
-| v1 (single-step) | 19% better | 7.0 | 34.8 | 34.5 |
-| v2 (DAgger rollout) | 26% better | 9.1 | 35.0 | 40.0 |
-| mv-fixed (no correction) | — | 11.3 | 36.0 | 40.2 |
+| Version                  | val MSE vs. zero-residual baseline | MOTA | IDF1 | mean fps |
+| ------------------------ | ---------------------------------- | ---- | ---- | -------- |
+| v1 (single-step)         | 19% better                         | 7.0  | 34.8 | 34.5     |
+| v2 (DAgger rollout)      | 26% better                         | 9.1  | 35.0 | 40.0     |
+| mv-fixed (no correction) | —                                  | 11.3 | 36.0 | 40.2     |
 
 **Read**: the diagnosis was correct and the fix measurably helped — better
 held-out regression accuracy, real MOTA/IDF1 gains over v1, throughput
@@ -155,11 +155,11 @@ the whole project is framed around.
 
 **Metric impact** (local smoke clip, M4):
 
-| Pipeline | max streams @ >=25fps/stream | aggregate fps ceiling |
-|---|---|---|
-| baseline | 4 | ~111 fps (saturates n=3-4) |
-| mv-fixed | 8 | ~270 fps (peaks n=6) |
-| mv-adaptive | 8 | ~209 fps (saturates n=6) |
+| Pipeline    | max streams @ >=25fps/stream | aggregate fps ceiling      |
+| ----------- | ---------------------------- | -------------------------- |
+| baseline    | 4                            | ~111 fps (saturates n=3-4) |
+| mv-fixed    | 8                            | ~270 fps (peaks n=6)       |
+| mv-adaptive | 8                            | ~209 fps (saturates n=6)   |
 
 **Read**: mv-fixed and mv-adaptive both double baseline's concurrent-stream
 capacity at the same per-stream quality bar, on the same chip — the
@@ -177,16 +177,16 @@ instead of relying on one discrete data point.
 **Metric impact**:
 
 | interval | HOTA | MOTA | IDF1 | mean fps |
-|---|---|---|---|---|
-| 2 | 30.9 | 1.0 | 33.6 | 22.4 |
-| 3 | 31.7 | 6.3 | 35.4 | 30.3 |
-| 5 | 32.0 | 11.3 | 36.0 | 40.2 |
-| 8 | 30.9 | 13.3 | 35.3 | 58.1 |
-| 10 | 31.0 | 13.5 | 35.9 | 64.4 |
+| -------- | ---- | ---- | ---- | -------- |
+| 2        | 30.9 | 1.0  | 33.6 | 22.4     |
+| 3        | 31.7 | 6.3  | 35.4 | 30.3     |
+| 5        | 32.0 | 11.3 | 36.0 | 40.2     |
+| 8        | 30.9 | 13.3 | 35.3 | 58.1     |
+| 10       | 31.0 | 13.5 | 35.9 | 64.4     |
 
 **Read**: the intuitive expectation is "more anchors = closer to baseline =
 more accurate." The data says otherwise for MOTA, which rises
-*monotonically* with anchor interval (1.0 → 13.5) across the entire swept
+_monotonically_ with anchor interval (1.0 → 13.5) across the entire swept
 range — more frequent anchors mean more chances for YOLOv8n's imperfect
 recall to fail a re-match and fragment/respawn a track's identity, while
 pure MV propagation never drops a track just because a detector missed it
@@ -227,12 +227,12 @@ code) and rerunning all four pipelines on full MOT17.
 
 **Metric impact**:
 
-| Pipeline | HOTA (n→s) | MOTA (n→s) | IDF1 (n→s) | fps (n→s) |
-|---|---|---|---|---|
-| baseline | 36.0 → 40.5 | 33.3 → 38.9 | 42.1 → 48.6 | 29.8 → 20.8 |
-| mv-fixed | 32.0 → 34.7 | 11.3 → 13.8 | 36.0 → 39.9 | 40.2 → 37.8 |
-| mv-adaptive | 29.3 → 32.2 | 13.3 → 16.3 | 33.7 → 37.5 | 69.8 → 63.6 |
-| mv-learned v2 | 30.5 → 33.2 | 9.1 → 11.2 | 35.0 → 38.4 | 40.0 → 32.6 |
+| Pipeline      | HOTA (n→s)  | MOTA (n→s)  | IDF1 (n→s)  | fps (n→s)   |
+| ------------- | ----------- | ----------- | ----------- | ----------- |
+| baseline      | 36.0 → 40.5 | 33.3 → 38.9 | 42.1 → 48.6 | 29.8 → 20.8 |
+| mv-fixed      | 32.0 → 34.7 | 11.3 → 13.8 | 36.0 → 39.9 | 40.2 → 37.8 |
+| mv-adaptive   | 29.3 → 32.2 | 13.3 → 16.3 | 33.7 → 37.5 | 69.8 → 63.6 |
+| mv-learned v2 | 30.5 → 33.2 | 9.1 → 11.2  | 35.0 → 38.4 | 40.0 → 32.6 |
 
 **Read**: real, consistent gains across every pipeline (HOTA +2.7 to +4.5,
 MOTA +2.1 to +5.6, IDF1 +2.8 to +6.5), confirming detector quality was a
@@ -243,13 +243,13 @@ pays the least (~9%, since it only detects on ~8% of frames). Adopted as
 the new project default (`Detector`'s and `eval/run.py`'s default weights).
 Baseline HOTA (40.5) still falls short of the ~60 ballpark, so detector
 quality wasn't the whole story either — the accuracy gap between baseline
-and the mv-* pipelines is unaffected by this change (still the same real
+and the mv-\* pipelines is unaffected by this change (still the same real
 propagation-drift and ID-churn issues, see findings #1 and #7), just at a
 uniformly higher starting point.
 
 ## 10. Fixing anchor re-association resolves the MOTA inversion (biggest single accuracy win)
 
-**What**: finding #7 showed more frequent anchors made MOTA *worse*, not
+**What**: finding #7 showed more frequent anchors made MOTA _worse_, not
 better. Root cause read from `MVTracker.step_anchor`: a single-pass
 IoU-Hungarian match with a hard 0.3 threshold spawned a brand-new track ID
 for any unmatched detection, no grace period, no confidence-tiered
@@ -269,12 +269,12 @@ running on real data.
 (YOLOv8s, same 7 sequences):
 
 | interval | HOTA (before→after) | MOTA (before→after) | IDF1 (before→after) | IDs produced (before→after, GT=546) |
-|---|---|---|---|---|
-| 2 | 30.9→37.0 | 1.0→25.5 | 33.6→43.5 | 1458→584 |
-| 3 | 31.7→36.8 | 6.3→25.7 | 35.4→43.7 | 1326→580 |
-| 5 | 32.0→35.7 | 11.3→26.4 | 36.0→42.5 | 1070→545 |
-| 8 | 30.9→34.7 | 13.3→25.1 | 35.3→41.6 | 941→518 |
-| 10 | 31.0→34.3 | 13.5→24.6 | 35.9→41.4 | 1004→514 |
+| -------- | ------------------- | ------------------- | ------------------- | ----------------------------------- |
+| 2        | 30.9→37.0           | 1.0→25.5            | 33.6→43.5           | 1458→584                            |
+| 3        | 31.7→36.8           | 6.3→25.7            | 35.4→43.7           | 1326→580                            |
+| 5        | 32.0→35.7           | 11.3→26.4           | 36.0→42.5           | 1070→545                            |
+| 8        | 30.9→34.7           | 13.3→25.1           | 35.3→41.6           | 941→518                             |
+| 10       | 31.0→34.3           | 13.5→24.6           | 35.9→41.4           | 1004→514                            |
 
 (Before-numbers above are YOLOv8n/pre-fix from #7 for the original
 inversion; the fix itself was tested on top of the YOLOv8s default from
@@ -313,17 +313,17 @@ holding `min_interval=2` and `ema_alpha=0.2` fixed and sweeping
 `max_interval` (the dominant lever; `spike_factor` had a smaller effect
 within each group, best value shifted slightly but stayed near 1.2-1.4):
 
-| max_interval | 8 | 10 | 15 | 20 |
-|---|---|---|---|---|
+| max_interval                 | 8    | 10   | 15   | 20   |
+| ---------------------------- | ---- | ---- | ---- | ---- |
 | best MOTA (any spike_factor) | 27.9 | 27.0 | 22.1 | 21.2 |
 
 Then validated the winner (`max_interval=8, spike_factor=1.4`, down from
 `15, 1.6`) on the full 7-sequence set:
 
-| mv-adaptive | HOTA | MOTA | IDF1 | mean fps | anchor rate |
-|---|---|---|---|---|---|
-| untuned (`max=15, spike=1.6`) | 32.5 | 21.8 | 39.1 | 62.9 | ~8% |
-| tuned (`max=8, spike=1.4`) | 35.4 | 25.4 | 42.7 | 44.2 | ~15-17% |
+| mv-adaptive                   | HOTA | MOTA | IDF1 | mean fps | anchor rate |
+| ----------------------------- | ---- | ---- | ---- | -------- | ----------- |
+| untuned (`max=15, spike=1.6`) | 32.5 | 21.8 | 39.1 | 62.9     | ~8%         |
+| tuned (`max=8, spike=1.4`)    | 35.4 | 25.4 | 42.7 | 44.2     | ~15-17%     |
 
 **Read**: `max_interval` dominated the sweep — MOTA fell monotonically as
 `max_interval` grew from 8 to 20, meaning the scheduler's untuned default
@@ -350,7 +350,7 @@ scheduling problem. `propagate_boxes` only ever did rigid translation
 (one whole-box median MV shift, width/height never change) — a plausible
 next lever, since MOT17 subjects walking toward/away from the camera
 should drift in scale with no correction. Rewrote it to shift each edge
-independently by the *local* median MV near that edge (left/right bands
+independently by the _local_ median MV near that edge (left/right bands
 for x0/x1, top/bottom bands for y0/y1) instead of one global median, which
 captures scale change for free without an explicit scale-factor estimate.
 Verified via 5 synthetic scenarios first (uniform field -> pure
@@ -360,10 +360,10 @@ unchanged) before running on real data.
 
 **Metric impact**:
 
-| Pipeline | HOTA (before→after) | MOTA (before→after) | IDF1 (before→after) |
-|---|---|---|---|
-| mv-fixed (interval=5) | 35.73→36.00 | 26.38→25.60 | 42.47→42.96 |
-| mv-adaptive (tuned) | 35.40→35.19 | 25.42→24.81 | 42.71→42.43 |
+| Pipeline              | HOTA (before→after) | MOTA (before→after) | IDF1 (before→after) |
+| --------------------- | ------------------- | ------------------- | ------------------- |
+| mv-fixed (interval=5) | 35.73→36.00         | 26.38→25.60         | 42.47→42.96         |
+| mv-adaptive (tuned)   | 35.40→35.19         | 25.42→24.81         | 42.71→42.43         |
 
 **Read**: flat-to-slightly-negative on the metric that matters most
 (MOTA down in both pipelines), mixed/marginal on HOTA and IDF1. Reverted
@@ -456,19 +456,60 @@ OSNet x0.25/MSMT17, same association code, both pipelines' `--use-reid`):
 | mv-fixed (interval=5) | 35.73→36.50 | 26.38→26.45 | 42.47→43.58 | 38.5→34.4 |
 | mv-adaptive (tuned) | 35.40→35.59 | 25.42→25.56 | 42.71→43.06 | 44.2→38.9 |
 
-**Read**: a real, non-noise-level win this time — HOTA +0.77/+0.19 and
-IDF1 +1.11/+0.35 across both pipelines (IDF1 specifically measures
-identity consistency, so it makes sense this is where a real ReID signal
-should show up most), at an ~11-12% fps cost from running the extra
-embedding network. MOTA barely moves, consistent with IDF1 being the
-metric this fix should affect most directly. This confirms the diagnosis
-from the first pass was correct: the mechanism (blending appearance into
-IoU-based association) was sound all along, and the earlier flat result
-was specifically about embedding quality, not the integration. Kept
-opt-in rather than made default, since the fps cost is real and the
-project's core throughput claim shouldn't quietly get more expensive by
-default — `--use-reid` is there for whoever wants the accuracy over the
-speed.
+**Read**: a real, non-noise-level win on mv-fixed's IDF1 (+2.6% relative)
+and a smaller HOTA gain (+2.2% relative), but the honest framing needs the
+cost held next to it: the fps drop is ~11% on mv-fixed and ~12% on
+mv-adaptive — proportionally *larger* than the accuracy gain in relative
+terms, and on mv-adaptive the gain is nearly nothing (+0.5% HOTA, +0.8%
+IDF1) for that same ~12% throughput cost. So this is a genuine Pareto
+tradeoff point, not a strict win: worth it if identity consistency
+(IDF1) matters more than raw throughput, not worth it if the project's
+actual headline claim (streams per chip) is what's being optimized —
+the multi-stream sweep was never rerun with `--use-reid` on, so the
+concrete impact on max-concurrent-streams is unmeasured but a single-run
+fps hit this size would plausibly lower that ceiling too. Confirms the
+original diagnosis was right (association mechanism was sound, embedding
+quality was the bottleneck), and MOTA barely moving is consistent with
+IDF1 being the metric this fix should affect most directly. Kept opt-in
+(`--use-reid`) rather than default, both because of the cost and because
+this project's own multi-stream throughput claim is the thing being
+traded away.
+
+## 14. Energy measurement (manual, one-off) — real signal after a noisy first attempt
+
+**What**: `scripts/bench_multistream.py --power` needs passwordless sudo
+for `powermetrics`, never configured. Rather than edit sudoers, tried a
+one-off manual measurement: user runs `sudo powermetrics` themselves
+(interactive password entry) while a pipeline runs, redirecting output to
+a file read afterward. First attempt (15s sample overlapping a single
+short sequence run) showed close to zero signal, and GPU power actually
+*lower* during "load" than idle — a clear tell it was noise, most likely
+from `powermetrics` measuring total system power (not per-process) plus
+imprecise start-time overlap between two manually-launched commands. A
+second attempt used a much longer, more sustained load: the full 7-sequence
+MOT17 `mv-adaptive` eval (~150s wall time) against a matching 150-sample
+power trace.
+
+**Metric impact**:
+
+| Condition | duration | CPU power | GPU power | Combined |
+|---|---|---|---|---|
+| Idle | 8s (8 samples) | 9494 mW | 137 mW | 9631 mW |
+| mv-adaptive, full MOT17 | 150s (150 samples) | 10157 mW | 505 mW | 10663 mW |
+| **Delta** | | **+7.0%** | **+2.7x** | **+10.7%** |
+
+**Read**: a real, physically-sensible signal this time — GPU power nearly
+tripling under sustained load is exactly what MPS inference actively
+running should look like, unlike the backwards result from the short
+sample. Caveats that matter: `powermetrics` reports total system power
+(display, background processes, everything), not this process alone, so
+the delta is a reasonable but not perfectly clean estimate of the
+pipeline's own draw; the idle baseline (8s) is much shorter than the load
+sample (150s) and ideally would be re-measured at matching duration for a
+fairer comparison; and this covers `mv-adaptive` only — a full
+"streams-per-watt" story (the original plan's stated goal) would need the
+same treatment applied to `baseline` and `mv-fixed` too, not done here.
+Summary in `results/energy_measurement.csv`.
 
 ## Summary: what actually worked vs. didn't
 
@@ -483,7 +524,7 @@ speed.
   separate from the MV approach (#9), and — the single biggest accuracy
   win in the project — fixing anchor re-association to eliminate a real,
   measured ID-churn problem that had been making more-frequent anchors
-  actively *hurt* MOTA (#10), roughly halving mv-fixed's MOTA gap to
+  actively _hurt_ MOTA (#10), roughly halving mv-fixed's MOTA gap to
   baseline without changing the core MV propagation idea at all.
 - **Didn't work, but rigorously diagnosed**: learned box correction.
   Root-caused a real distribution-mismatch bug, fixed it with a
@@ -498,18 +539,23 @@ speed.
   measured flat-to-slightly-negative on real MOT17 (MOTA down in both
   mv-fixed and mv-adaptive) — reverted to the original rather than kept
   for a mixed-at-best result, the same discipline applied to CorrectionNet.
-- **Diagnosed flat, then fixed and confirmed real**: appearance-based
-  re-identification (#13). First pass (generic ImageNet-pretrained
-  embedding) measured flat on both pipelines despite genuinely
+- **Diagnosed flat, fixed, and a real (if costly) tradeoff**:
+  appearance-based re-identification (#13). First pass (generic
+  ImageNet-pretrained embedding) measured flat despite genuinely
   influencing ~26% of real assignment decisions — diagnosed cause: a
   classifier backbone encodes "this is a person," not "this is *this*
-  person." Rather than train a fix on MOT17's small identity pool (real
-  overfitting risk), sourced OSNet pretrained on MSMT17 (an actual
-  ReID benchmark, 4101 identities) from Hugging Face Hub — zero training
-  on MOT17, zero overfitting risk. Verified the checkpoint loads exactly
-  (0 missing/unexpected keys) and is measurably more discriminative on
-  real MOT17 crops before wiring it in. Result: a real, non-noise HOTA/IDF1
-  gain on both pipelines (+0.77/+1.11 and +0.19/+0.35) at an ~11-12% fps
-  cost — kept opt-in given the cost, but this is the one lever in the
-  whole follow-on accuracy pass that was a clean, unambiguous win once the
-  right embedding source was used.
+  person." Sourced OSNet, pretrained on MSMT17 (an actual ReID benchmark)
+  from Hugging Face Hub instead of training anything on MOT17's small
+  identity pool — zero overfitting risk. Result: a real HOTA/IDF1 gain on
+  mv-fixed, next to nothing on mv-adaptive, at an ~11-12% fps cost on
+  both — a genuine Pareto tradeoff, not a strict win, and one that likely
+  cuts against this project's own headline streams-per-chip claim. Kept
+  opt-in given the cost.
+- **A real, if partial, energy result** (#14): manual `powermetrics`
+  measurement (no automated sudo access configured) showed combined power
+  up 10.7% and GPU power up 2.7x under sustained `mv-adaptive` load vs.
+  idle — physically sensible (GPU tripling matches active MPS inference),
+  unlike a first noisy short-sample attempt that showed backwards,
+  not-credible numbers. Caveated honestly: total-system power, not
+  per-process, and only one pipeline measured, not the full
+  baseline-vs-mv-* comparison the original plan wanted.
