@@ -208,13 +208,22 @@ MVTracker/IoU-Hungarian association logic — isolating exactly the
 anchor-vs-propagate difference the project is about, with anchor frames
 highlighted.
 
-**What it shows**: a real propagation-drift artifact — a track that lags
-behind as its subject walks away, before eventually being pruned — visible
-on the mv-adaptive side around frames 30-100 of the rendered clip. Left in
-deliberately rather than cherry-picked away: it's a visual instance of
-exactly the MOTA cost quantified in finding #1, not a rendering bug. A
-demo that only shows the pipeline's best moments would undersell how real
-the accuracy/throughput tradeoff actually is.
+**What it originally showed**: a real propagation-drift artifact — a
+track that lagged behind as its subject walked away, before eventually
+being pruned — visible on the mv-adaptive side around frames 30-100 of
+the first rendered clip. Left in deliberately rather than cherry-picked
+away at the time: it was a visual instance of exactly the MOTA cost
+quantified in finding #1, not a rendering bug.
+
+**Regenerated after #10/#11 (re-association fix + scheduler tuning)**:
+the script picks up `MVTracker`'s and `Adaptive`'s current defaults with
+no code changes, so simply rerunning it reflects every fix made this
+session. The drift artifact is gone in the regenerated video — both sides
+now track the same person with one consistent ID throughout, matching
+the quantified MOTA improvement rather than contradicting it. Kept the
+original artifact described above as a record of what the pre-fix
+pipeline actually looked like, since the numbers alone don't convey it as
+viscerally as the video did.
 
 ## 9. Detector ceiling check (YOLOv8n → YOLOv8s)
 
