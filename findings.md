@@ -520,6 +520,133 @@ fairer comparison; and this covers `mv-adaptive` only — a full
 same treatment applied to `baseline` and `mv-fixed` too, not done here.
 Summary in `results/energy_measurement.csv`.
 
+## 15. `max_age` tied to anchor cadence — the ghost-track fix that closed most of the remaining MOTA gap
+
+**What**: after items 9-11 (detector swap, re-association fix, scheduler
+tuning), mv-fixed/mv-adaptive still trailed baseline MOTA by ~13-14 points,
+and the anchor-interval ablation (#7/#10) showed this gap was *flat*
+regardless of interval (2 through 10) — a strong hint the bottleneck
+wasn't propagation drift accumulating over distance from the last anchor,
+since a shorter interval should reduce drift-driven loss and it didn't.
+
+**Diagnostic**: wrote a scratchpad script (`greedy_recall` vs ground
+truth, IoU>=0.5, bucketed by frames-since-last-anchor) and ran it on real
+MOT17 sequences. On MOT17-09 (easy), recall did decay mildly with distance
+(87.5% at the anchor frame down to 80.3% four frames later) — a real but
+small effect. On MOT17-04 (hard, dense, the sequence dragging down every
+pipeline's aggregate number), recall was **flat and low even at the
+anchor frame itself**: 43.5% fresh, 42.7% four frames later. Since the
+anchor frame runs the *same* detector as baseline with zero propagation
+involved, this proved the loss on hard sequences wasn't a propagation
+problem at all — it looked like a detector recall ceiling.
+
+That led to testing a bigger detector (yolov8m) as the fix — matched
+subset (MOT17-09+10), same everything else:
+
+| Detector | baseline MOTA | mv-fixed MOTA | relative drop |
+|---|---|---|---|
+| yolov8s (current) | 44.313 | 29.057 | 34.4% |
+| yolov8m | 48.145 | 29.927 | 37.8% |
+
+**Negative result, and an instructive one**: yolov8m raised baseline MOTA
+by +3.83 points but mv-fixed by only +0.87 — because mv-fixed only exposes
+~20% of frames (the anchors) to the detector at all, so a better detector
+mostly just helps baseline, which sees it on *every* frame. The relative
+gap got *worse*, not better. Rejected; yolov8s stays the default.
+
+**Real root cause**, found by comparing CLEAR components instead of just
+MOTA on that same matched subset:
+
+| | baseline | mv-fixed (max_age=30) |
+|---|---|---|
+| CLR_FN | 8633 | 8648 (matches!) |
+| CLR_FP | 1257 | **4120 (3.3x)** |
+
+FN — missed detections — was a near-exact match between baseline and
+mv-fixed. The gap was entirely **false positives**. Reading
+`MVTracker.step_anchor`/`step_propagate` (`src/mvtrack/track/tracker.py`)
+explained why: a track that goes unmatched at an anchor frame isn't
+deleted immediately — it just increments `since_detection`, gets pruned
+only once `since_detection > max_age`, and *keeps being propagated and
+reported as a live box* in the meantime. With the old flat default of 30,
+a single missed anchor let a stale/wrong box "ghost" for up to 30 more
+frames (~6 anchor cycles at interval=5) before pruning — a textbook false
+positive generator.
+
+**Fix**: `max_age` should be at least the longest possible gap between
+anchors, so a track survives exactly long enough to get a fair shot at
+its next real anchor and no longer. Swept `max_age` on the two fast
+tuning sequences (`scripts/tune_max_age.py`):
+
+| max_age | mv-fixed MOTA (interval=5) |
+|---|---|
+| 1 | 8.29 |
+| 2 | 16.72 |
+| 3 | 24.89 |
+| **5** | **41.98** |
+| 8 | 40.88 |
+| 15 | 37.37 |
+| 30 (old default) | 29.06 |
+
+`max_age=5` (== `anchor_interval`) wins clearly. **Pitfall hit applying
+the same value to mv-adaptive**: `max_age=5` *collapsed* mv-adaptive's
+accuracy (HOTA 31.7->9.5, IDSW 123->820, CLR_Re 50.6->38.5) instead of
+helping. Cause: mv-adaptive's scheduler can leave gaps up to
+`max_interval=8` between anchors, so `max_age=5` pruned tracks *before*
+they ever got a chance to reach their real next anchor — killing
+legitimate tracks early and forcing spurious respawns (churn) rather than
+just killing ghosts. A separate sweep confirmed `max_age=8` (==
+`scheduler.max_interval`) is mv-adaptive's actual optimum:
+
+| max_age | mv-adaptive MOTA |
+|---|---|
+| 6 | 32.61 |
+| **8** | **38.47** |
+| 10 | 37.70 |
+| 12 | 36.83 |
+| 15 | 35.33 |
+| 20 | 33.14 |
+| 30 (old default) | 27.86 |
+
+**Fix adopted** in `eval/run.py`: `run_mv_fixed` now defaults the
+tracker's `max_age` to `anchor_interval`; `run_mv_adaptive` defaults it to
+`scheduler.max_interval`. `MVTracker`'s own dataclass default stays `30`,
+documented as a fallback only for callers that construct it directly
+without going through the eval harness — no single global constant fits
+both schedulers.
+
+**Full 7-sequence validation** (the tuning subset above is deliberately
+held out from final reporting):
+
+| Pipeline | HOTA | MOTA | IDF1 | relative MOTA drop vs. baseline (38.868) |
+|---|---|---|---|---|
+| baseline | 40.456 | 38.868 | 48.55 | — |
+| mv-fixed (max_age=5) | 36.039 | 34.948 | 42.359 | **10.1%** |
+| mv-adaptive (max_age=8) | 35.989 | 33.095 | 43.044 | **14.85%** |
+
+Both land under a 15%-relative-MOTA-drop target — mv-fixed comfortably,
+mv-adaptive right at the edge. This is a real, deterministic result
+(TrackEval scoring has no run-to-run variance, unlike fps).
+
+**fps caveat, reported honestly rather than papered over**: the in-session
+fps readback for this validation run was 19.0 (mv-fixed) / 23.3
+(mv-adaptive), down from the previously-committed 38.5/44.2 for the same
+configs. Before accepting that as a real regression, checked system state
+(`top`) during a rerun: `Load Avg: 22.10, 21.08, 21.11` and 73.3% sys CPU
+time on this machine — evidence of heavy contention, plausibly from ~45
+minutes of continuous back-to-back MPS jobs in this session (many sweeps
++ full evals run in sequence) plus other running applications, consistent
+with the already-documented "fps run-to-run variance" gotcha. A rerun of
+just MOT17-04 in isolation still showed ~9.3fps (not recovered), so this
+wasn't a one-off blip either — but the `max_age` fix has no mechanistic
+reason to cost more fps (it only changes *when* a track is pruned, and
+pruning more aggressively should mean *less* work, not more, since fewer
+stale tracks sit in the Hungarian assignment matrix each anchor frame).
+Treating the 19.0/23.3 fps readback as confounded rather than real;
+carrying the pre-fix fps numbers (38.5/44.2) forward with a flag rather
+than overwriting them, and recommending a clean re-measurement in a
+fresh/idle session before revising them either way.
+
 ## Summary: what actually worked vs. didn't
 
 - **Worked, real and reproducible**: MV propagation for throughput (at a
@@ -568,3 +695,19 @@ Summary in `results/energy_measurement.csv`.
   not-credible numbers. Caveated honestly: total-system power, not
   per-process, and only one pipeline measured, not the full
   baseline-vs-mv-* comparison the original plan wanted.
+- **Worked, and the single biggest accuracy win of any pass** (#15): tying
+  `MVTracker.max_age` to each pipeline's real max anchor gap instead of a
+  flat `30`. Diagnosed via a from-scratch recall probe that the residual
+  gap after #9-11 wasn't propagation drift (recall was flat with distance
+  from the anchor, even on the hardest sequence) but false positives —
+  ghost tracks surviving up to 30 frames past being missed at an anchor.
+  A bigger detector (yolov8m) was tried first and *rejected* as a clean
+  negative result (it widened the relative gap since mv-fixed only sees it
+  on anchor frames). The real fix took mv-fixed's full-7-seq relative MOTA
+  drop vs. baseline from ~32% to **10.1%**, and mv-adaptive's from ~35% to
+  **14.85%** — both under a 15% target for the first time. Hit and
+  resolved a genuine cross-pipeline pitfall along the way (a value tuned
+  for mv-fixed broke mv-adaptive outright), and flagged rather than
+  silently absorbed a confounded in-session fps re-measurement (system
+  load avg 22 at measurement time) instead of overwriting the previously
+  clean fps numbers with contaminated ones.

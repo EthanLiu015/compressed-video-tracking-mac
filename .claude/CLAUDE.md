@@ -83,21 +83,41 @@ scripts/     # data prep, demos, smoke tests
 
 **Current defaults: YOLOv8s detector + three-stage ByteTrack-style
 re-association in `MVTracker.step_anchor` + tuned `Adaptive` scheduler
-params (`max_interval=8, spike_factor=1.4`, was `15, 1.6`).** All three
-changes came from a follow-on accuracy-improvement pass (plan in
-`~/.claude/plans/breezy-knitting-dragon.md`, "Follow-on" section) that
+params (`max_interval=8, spike_factor=1.4`, was `15, 1.6`) + `max_age` tied
+to each pipeline's max anchor gap (`anchor_interval` for mv-fixed,
+`scheduler.max_interval` for mv-adaptive, was a flat `30` for both).** The
+first three changes came from a follow-on accuracy-improvement pass (plan
+in `~/.claude/plans/breezy-knitting-dragon.md`, "Follow-on" section) that
 started from the observation that MOTA was hit far harder than HOTA/IDF1
-across every mv-* pipeline:
+across every mv-* pipeline; the fourth (`max_age`) came from a later pass
+targeting the same MOTA gap directly (see item 4 and `findings.md` #15):
 
 | Pipeline | HOTA | MOTA | IDF1 | mean fps |
 |---|---|---|---|---|
 | baseline (full decode+detect every frame) | 40.5 | 38.9 | 48.6 | 20.8 |
-| mv-fixed (anchor every 5th frame) | 35.7 | 26.4 | 42.5 | 38.5 |
-| mv-adaptive (~15-17% anchor rate, tuned) | 35.4 | 25.4 | 42.7 | 44.2 |
-| mv-learned v2 (mv-fixed + CorrectionNet, DAgger rollout training) | 34.6 | 25.5 | 41.7 | 33.7 |
+| mv-fixed (anchor every 5th frame) | 36.0 | 34.9 | 42.4 | 38.5* |
+| mv-adaptive (~15-17% anchor rate, tuned) | 36.0 | 33.1 | 43.0 | 44.2* |
+
+\* fps carried over from the pre-`max_age`-fix measurement (the fix only
+changes when a track is pruned, not per-frame work, so it shouldn't move
+throughput) — the in-session re-measurement after this fix landed 19.0/23.3,
+but that run coincided with `Load Avg: 22` and 73% sys time on this
+machine (confirmed via `top`, after ~45 min of continuous back-to-back
+MPS jobs), a documented confound (see the "fps run-to-run variance"
+gotcha below), not a real regression. Re-measure fps in a fresh/cool
+session before trusting a revision to these numbers either way.
 
 <details>
 <summary>Superseded numbers (kept for reference — see git history for the swap/fix commits)</summary>
+
+YOLOv8s + re-association fix + scheduler tuning, before the `max_age` fix
+(the numbers reported as "current" prior to this pass):
+
+| Pipeline | HOTA | MOTA | IDF1 | mean fps |
+|---|---|---|---|---|
+| mv-fixed | 35.7 | 26.4 | 42.5 | 38.5 |
+| mv-adaptive | 35.4 | 25.4 | 42.7 | 44.2 |
+| mv-learned v2 (mv-fixed + CorrectionNet, DAgger rollout training) | 34.6 | 25.5 | 41.7 | 33.7 |
 
 YOLOv8s + re-association fix, before scheduler tuning (mv-adaptive still
 on untuned `max_interval=15, spike_factor=1.6`):
@@ -182,24 +202,58 @@ YOLOv8n, original numbers:
    roughly matching mv-fixed (35.4/25.4/42.7 vs 35.7/26.4/42.5) while
    still being meaningfully faster (44.2 vs 38.5 fps).
 
+4. **Tied `MVTracker.max_age` to each pipeline's actual max anchor gap**
+   (was a flat `30` for every pipeline) — the single biggest MOTA win of
+   any pass so far, bigger than items 1-3 combined. Motivated by a
+   diagnostic showing item 1-3's residual gap wasn't a recall problem: a
+   scratchpad probe (greedy IoU-recall vs ground truth, bucketed by
+   frames-since-last-anchor on MOT17-04) found recall on a *fresh anchor
+   frame itself* was only ~43.5%, nearly identical to frames 4 steps into
+   the propagation window (~42.7%) — i.e. flat, and already at the
+   detector's own ceiling on this scene, not degrading with drift as
+   hypothesized. Confirmed via a matched-subset yolov8s-vs-yolov8m test:
+   FN counts were nearly identical between baseline and mv-fixed on
+   MOT17-09+10 (8633 vs 8648), but **CLR_FP was 3.3x higher for mv-fixed**
+   (1257 vs 4120) — the gap was false positives, not missed detections.
+   Root cause: a track missed at one anchor wasn't pruned until
+   `since_detection > max_age`; with the default of 30 it kept being
+   propagated *and reported* as a live box for up to 30 more frames (~6
+   anchor cycles) — a ghost track. Fix: default `max_age` to
+   `anchor_interval` for mv-fixed and to `scheduler.max_interval` for
+   mv-adaptive in `eval/run.py` (the `MVTracker` dataclass keeps `30` only
+   as a documented fallback for direct construction). Hit one real pitfall
+   mid-fix: a `max_age=5` tuned against mv-fixed collapsed mv-adaptive's
+   HOTA from 31.7 to 9.5 (IDSW 123->820), because mv-adaptive's scheduler
+   can leave gaps up to `max_interval=8` — pruning at 5 killed legitimate
+   tracks *before* their real next anchor ever arrived, forcing spurious
+   respawns instead of just killing ghosts. Each pipeline needed its own
+   value tuned/derived separately; see `findings.md` #15 for the full
+   sweep (`scripts/tune_max_age.py`) and both failure/success numbers.
+
 MV propagation is still a real accuracy/throughput tradeoff, not a free
-win — MOTA still trails baseline meaningfully (~39% vs ~25-26% for the
-mv-* pipelines) even after all three fixes, because propagation drift
-between anchors is still real. But the gap narrowed substantially (was
-~25-28 points before this pass, now ~13-14). This is the honest core result;
+win — MOTA still trails baseline (38.9 vs. 34.9/33.1 for mv-fixed/mv-adaptive)
+even after all four fixes, because propagation drift between anchors is
+still real. But the gap narrowed dramatically: from ~25-28 points before
+this whole follow-on effort, to ~13-14 after items 1-3, to **~4-6 points
+(10.1%/14.85% relative) after item 4** — the first time the relative MOTA
+drop has come in under a 15% target. This is the honest core result;
 report it as-is rather than only the throughput number. Note baseline
 itself (HOTA 40.5) still falls short of a well-tuned ByteTrack-on-MOT17
 ballpark (~60) — YOLOv8s is better than YOLOv8n but still a small/fast
-model; a larger detector (yolov8m/l) or confidence/NMS tuning would likely
-raise the ceiling further at additional throughput cost, not attempted
-here. Tried per-edge scale correction in `propagate_boxes` as a further
-lever (shift each box edge by local rather than whole-box median MV,
-capturing scale drift with no explicit scale factor) — verified correct
-via 5 synthetic scenarios, but measured flat-to-slightly-negative on real
-MOT17 (MOTA down in both mv-fixed and mv-adaptive) and reverted; see
-findings.md #12. mv-fixed at very short anchor intervals (2-3) also
-confirmed the residual gap isn't a scheduling problem — MOTA is flat
-~25-26% at interval 2, 3, and 5 alike.
+model. A larger detector (yolov8m) was tried as a further lever on the
+same 2 tuning sequences and **rejected**: it raised baseline's MOTA more
+than mv-fixed's (since mv-fixed only exposes the detector to ~20% of
+frames), which *widened* the relative gap (34.4%->37.8%) rather than
+closing it — a clean negative result, not pursued further; see
+`findings.md` #15. Tried per-edge scale correction in `propagate_boxes` as
+a further lever (shift each box edge by local rather than whole-box median
+MV, capturing scale drift with no explicit scale factor) — verified
+correct via 5 synthetic scenarios, but measured flat-to-slightly-negative
+on real MOT17 (MOTA down in both mv-fixed and mv-adaptive) and reverted;
+see findings.md #12. mv-fixed at very short anchor intervals (2-3) also
+confirmed the residual gap wasn't a scheduling-frequency problem on its
+own — MOTA was flat ~25-26% at interval 2, 3, and 5 alike (pre-`max_age`-fix;
+see item 4 for what the flatness actually traced back to).
 
 Also built appearance-based re-identification (`src/mvtrack/track/reid.py`,
 `MVTracker(use_appearance=True)`, CLI `--use-reid`) — blends a cosine

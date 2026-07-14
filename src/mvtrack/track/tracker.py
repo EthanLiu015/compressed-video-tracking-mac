@@ -56,6 +56,18 @@ class Track:
 @dataclass
 class MVTracker:
     iou_thresh: float = 0.3
+    # Must be >= the longest possible gap between anchor frames for whichever
+    # scheduler drives this tracker, or a track gets pruned as a false
+    # "ghost" before it ever gets a chance to be re-matched at its next
+    # anchor -- this is a real, measured bug, not a hypothetical: with the
+    # old default of 30, a track missed at just one anchor kept being
+    # propagated *and reported* as live for up to 30 more frames / ~6 anchor
+    # cycles, which is exactly what inflated false positives (mv-fixed's
+    # CLR_FP measured 3.3x baseline's while FN roughly matched -- see
+    # findings.md #15). eval/run.py's run_mv_fixed/run_mv_adaptive already
+    # set this correctly per-pipeline (anchor_interval / scheduler.max_interval
+    # respectively); 30 is kept here only as the fallback for callers who
+    # construct MVTracker directly.
     max_age: int = 30
     high_conf_thresh: float = 0.5  # splits detections into ByteTrack-style high/low buckets
     iou_thresh_low: float = 0.2  # stage 2: low-conf dets recovering a track, looser gate

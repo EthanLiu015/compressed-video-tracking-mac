@@ -72,6 +72,7 @@ def run_mv_fixed(
     anchor_interval: int = 5,
     weights: str = "yolov8s.pt",
     use_reid: bool = False,
+    tracker_kwargs: dict | None = None,
     **_kwargs,
 ) -> tuple[int, float]:
     """Detector fires every `anchor_interval` frames; MV propagation fills the
@@ -81,7 +82,11 @@ def run_mv_fixed(
     from mvtrack.track import MVTracker
 
     detector = Detector(weights)
-    tracker = MVTracker(use_appearance=use_reid)
+    # max_age must cover the longest possible gap between anchors (here,
+    # anchor_interval itself) or a track that simply hasn't hit its next
+    # anchor yet gets pruned as a false "ghost" -- see findings.md #15.
+    kwargs = {"max_age": anchor_interval, **(tracker_kwargs or {})}
+    tracker = MVTracker(use_appearance=use_reid, **kwargs)
     reid = None
     if use_reid:
         from mvtrack.track.reid import ReIDEmbedder
@@ -116,6 +121,7 @@ def run_mv_adaptive(
     weights: str = "yolov8s.pt",
     scheduler_kwargs: dict | None = None,
     use_reid: bool = False,
+    tracker_kwargs: dict | None = None,
     **_kwargs,
 ) -> tuple[int, float]:
     """Same as run_mv_fixed but anchor timing comes from Adaptive (residual-
@@ -126,8 +132,14 @@ def run_mv_adaptive(
     from mvtrack.track import MVTracker
 
     detector = Detector(weights)
-    tracker = MVTracker(use_appearance=use_reid)
     scheduler = Adaptive(**(scheduler_kwargs or {}))
+    # max_age must cover the scheduler's longest possible anchor gap
+    # (max_interval) or a track gets pruned as a false "ghost" before its
+    # next anchor ever arrives -- see findings.md #15. Using max_age=5
+    # (tuned for mv-fixed's fixed 5-frame gap) here instead collapsed
+    # mv-adaptive's HOTA from 31.7 to 9.5 by killing legitimate tracks early.
+    kwargs = {"max_age": scheduler.max_interval, **(tracker_kwargs or {})}
+    tracker = MVTracker(use_appearance=use_reid, **kwargs)
     reid = None
     if use_reid:
         from mvtrack.track.reid import ReIDEmbedder
@@ -268,7 +280,12 @@ def main() -> None:
         "--use-reid", action="store_true",
         help="blend a learned appearance embedding into association (mv-fixed/mv-adaptive)",
     )
+    ap.add_argument(
+        "--max-age", type=int, default=None,
+        help="MVTracker max_age override (frames unmatched before a track is pruned)",
+    )
     args = ap.parse_args()
+    tracker_kwargs = {"max_age": args.max_age} if args.max_age is not None else None
 
     videos = sorted((MOT / "videos").glob("MOT17-*-FRCNN.mp4"))
     if args.seqs:
@@ -288,6 +305,7 @@ def main() -> None:
             correction_checkpoint=args.correction_checkpoint,
             weights=args.weights,
             use_reid=args.use_reid,
+            tracker_kwargs=tracker_kwargs,
         )
         fps = frames / dt
         fps_all.append(fps)

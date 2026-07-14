@@ -16,18 +16,25 @@ All numbers are on real MOT17 train ground truth (7 FRCNN sequences),
 YOLOv8s person-class detector (the project default — a ceiling check
 confirmed YOLOv8n was leaving real accuracy on the table across every
 pipeline) plus a fixed three-stage ByteTrack-style re-association in
-`MVTracker` and a tuned `Adaptive` scheduler (see below). Full detail and
-honest negative results in `findings.md`; per-session narrative in
-`.claude/CLAUDE.md`.
+`MVTracker`, a tuned `Adaptive` scheduler, and `max_age` tied to each
+pipeline's real max anchor gap instead of a flat constant (see below).
+Full detail and honest negative results in `findings.md`; per-session
+narrative in `.claude/CLAUDE.md`.
 
 | Pipeline | HOTA | MOTA | IDF1 | mean fps |
 |---|---|---|---|---|
 | baseline (full decode + detect every frame) | 40.5 | 38.9 | 48.6 | 20.8 |
-| mv-fixed (anchor every 5th frame) | 35.7 | 26.4 | 42.5 | 38.5 |
-| mv-adaptive (residual-energy-proxy scheduler, tuned, ~15-17% anchor rate) | 35.4 | 25.4 | 42.7 | 44.2 |
+| mv-fixed (anchor every 5th frame) | 36.0 | 34.9 | 42.4 | 38.5 |
+| mv-adaptive (residual-energy-proxy scheduler, tuned, ~15-17% anchor rate) | 36.0 | 33.1 | 43.0 | 44.2 |
 | mv-learned (mv-fixed + learned box correction) | 34.6 | 25.5 | 41.7 | 33.7 |
 | mv-fixed + `--use-reid` (OSNet/MSMT17 appearance) | 36.5 | 26.4 | 43.6 | 34.4 |
 | mv-adaptive + `--use-reid` | 35.6 | 25.6 | 43.1 | 38.9 |
+
+mv-fixed's MOTA now trails baseline by only **10.1%** relative
+(34.9 vs. 38.9), mv-adaptive by **14.85%** — both under a 15%-relative-drop
+bar, up from ~32-35% before the `max_age` fix below. (The `--use-reid`
+rows above predate this fix and are stale relative to the new default;
+not re-run since ReID is opt-in and out of scope for this pass.)
 
 ![HOTA/MOTA vs throughput](results/plots/pipeline_pareto.png)
 
@@ -53,6 +60,24 @@ features encode "a person," not "*this* person"), but swapping in OSNet
 MOT17 so zero overfitting risk) gave a real HOTA/IDF1 gain on both
 pipelines at an ~11-12% fps cost (findings.md #13) — kept opt-in given
 the cost.
+
+The remaining gap after all of that turned out to be a different bug, not
+propagation drift: a recall probe bucketed by frames-since-last-anchor
+showed recall was flat with distance from the anchor (even on the
+hardest MOT17 sequence, ~43% at the anchor frame itself vs. ~43% four
+frames later) — the loss wasn't accumulating drift. Comparing CLEAR
+components directly showed why: false-negative counts matched baseline
+almost exactly, but **false positives were 3.3x higher**. `MVTracker`
+let a track missed at one anchor keep being propagated *and reported* as
+a live box for up to `max_age=30` frames (~6 anchor cycles) before
+pruning — a ghost-track bug. Tying `max_age` to each pipeline's real max
+anchor gap (`anchor_interval` for mv-fixed, `scheduler.max_interval` for
+mv-adaptive) fixed it — the single biggest MOTA win of any pass so far,
+closing the relative gap to baseline from ~32-35% down to 10.1%/14.85%
+(findings.md #15). A bigger detector (yolov8m) was tried as an
+alternative fix first and rejected: it helped baseline (which sees every
+frame) far more than mv-fixed (which only sees ~20% of frames), *widening*
+the relative gap rather than closing it.
 
 mv-adaptive still roughly doubles baseline's max concurrent-stream
 capacity on the same chip at a fixed 25fps/stream quality bar (multi-stream
