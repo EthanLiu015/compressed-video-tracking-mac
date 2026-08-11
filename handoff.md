@@ -55,6 +55,25 @@ of truth going forward).
 Everything is committed; 18 commits on `main`, working tree clean as of
 this handoff.
 
+- **Application-exploration pass** (after the follow-on accuracy pass):
+  built real downstream applications on top of the finished tracker and
+  reported honest results on each, not just the wins. Tennis positioning
+  analytics (real court homography + opponent-relative "bisector"
+  recovery stat, two real bugs caught and fixed by checking output).
+  A real negative result on when throughput actually matters (single-court
+  tennis already keeps up live on baseline — the multi-stream case is
+  where this project's real advantage lives, not single-stream). Marathon
+  cross-checkpoint re-identification on real same-event footage — a
+  numerically-plausible result that visual inspection of the actual crop
+  pairs revealed was a clothing-color false positive, not identity (see
+  findings.md #16). A real detector-floor finding on extreme-elevation
+  crowd cameras (findings.md #17), diagnosed and resolved by picking a
+  better-suited site rather than continuing to tune around a mismatch.
+  Currently mid-pivot to the WildTrack academic multi-camera dataset for
+  a genuine multi-camera ground-plane-fusion demo (plaza dwell/lingering
+  detection, "PULSE") — see `.claude/CLAUDE.md`'s "Applications built on
+  the core tracker" section for full detail.
+
 ## Current State
 
 - **Real MOT17 data is in place**: `data/MOT17/` (train GT + re-encoded
@@ -152,13 +171,40 @@ results/
 handoff.md, findings.md                    # this file and the metrics writeup
 ```
 
+Application-exploration pass (see CLAUDE.md for full narrative):
+
+```
+src/mvtrack/court/homography.py            # pixel <-> real-world court-meters, tennis
+scripts/
+  court_positioning.py                     # opponent-relative "bisector" recovery stat
+  live_feasibility.py                      # real-time keep-up test, single-stream negative result
+  checkpoint_reid.py                       # cross-checkpoint appearance re-id (findings.md #16)
+  plaza_dwell.py                           # dwell/lingering detection, "PULSE" (findings.md #17)
+data/
+  tennis_video.mp4, checkpoint_start_okc.mp4, checkpoint_finish_okc.mp4,
+  checkpoint_start_pikespeak.mp4, plaza_ts_{crossroads,north}.mp4,
+  plaza_bryant.mp4                          # sourced clips, verified real before trusting
+  wildtrack/                                # WildTrack dataset, download in progress (see Blockers)
+outputs/checkpoint_reid_crops/              # top-10 crop pairs saved for visual verification
+outputs/plaza_dwell/dwell_overlay.png       # visual check of dwell classification
+```
+
 Not committed (gitignored, regeneratable): `data/`, `outputs/`
 (checkpoints, per-run result txts, plots), `.venv/`, `*.egg-info/`.
 
 ## Blockers
 
-- **None currently active.** The standing MOT17 blocker (`motchallenge.net`
-  down) is resolved via the Kaggle mirror.
+- **WildTrack dataset download in progress.** EPFL's server
+  (`documents.epfl.ch`) drops the connection under sustained transfer
+  (`curl: (56) Recv failure: Operation timed out`) every few minutes —
+  not this machine's network, confirmed via repeated retries succeeding
+  incrementally. Running as a self-resuming retry loop
+  (`data/wildtrack/resume_download.sh`, `curl -C -` in a loop) rather than
+  a single call. Not done as of this handoff; check
+  `data/wildtrack/Wildtrack_dataset_full.zip` size against the expected
+  6,807,496,358 bytes before building anything on top of it.
+- The standing MOT17 blocker (`motchallenge.net` down) is resolved via the
+  Kaggle mirror.
 - `powermetrics` energy sampling needs passwordless `sudo` (`sudo -n`),
   not configured in this environment — this is a system/sudoers change
   the user should make deliberately if energy numbers are wanted, not
@@ -166,8 +212,15 @@ Not committed (gitignored, regeneratable): `data/`, `outputs/`
 
 ## Next Steps
 
+**Active**: once `data/wildtrack/` finishes downloading, build Stage 2 of
+PULSE — ground-plane fusion of dwell/lingering detections across
+WildTrack's genuinely-overlapping calibrated cameras (the real
+multi-camera payoff the live-webcam search couldn't reliably produce).
+Either reuse WildTrack's provided calibration directly or build a
+from-scratch homography (as done for tennis) and cross-check against it.
+
 Both the 14-week plan and the follow-on accuracy pass are complete. What's
-left is optional polish, not core scope:
+left there is optional polish, not core scope:
 
 - **Optional**: `mv-learned`'s CorrectionNet still slightly trails
   mv-fixed on every metric even after re-testing on top of both fixes

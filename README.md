@@ -171,3 +171,16 @@ python scripts/bench_multistream.py --pipeline mv-adaptive \
     --video data/people_baseline.mp4 --streams 1 2 3 4 6 8
 python scripts/make_plots.py              # regenerates results/plots/*.png from results/*.csv
 ```
+
+## Applications
+
+Real downstream uses built on top of the tracker above, each with its own
+honest result (including two real negative findings) — full narrative in
+`.claude/CLAUDE.md`'s "Applications built on the core tracker" section:
+
+```bash
+python scripts/court_positioning.py       # tennis: real-world court homography + recovery-position stat
+python scripts/live_feasibility.py        # does real-time tracking actually need mv-tracking's speedup?
+python scripts/checkpoint_reid.py         # cross-checkpoint appearance re-id (negative result, findings.md #16)
+python scripts/plaza_dwell.py             # pedestrian dwell/lingering detection, "PULSE" (findings.md #17)
+```

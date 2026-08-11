@@ -391,6 +391,125 @@ this covers `mv-adaptive` only, not a baseline-vs-mv-* energy comparison
 the full "streams vs. watts" story the original plan called for). Summary
 in `results/energy_measurement.csv`.
 
+## Applications built on the core tracker (post-14-week exploration)
+
+After the core accuracy/throughput work above was done, a separate pass
+explored what the tracker is actually *for* — concrete applications, real
+sourced data, and honest results on each. Four threads, in order:
+
+**1. Tennis positioning analytics** (`src/mvtrack/court/homography.py`,
+`scripts/court_positioning.py`). Built a pixel-to-real-world-court
+homography (8 reference points — 4 baseline + 4 service-line corners —
+picked by eye off a real US Open broadcast clip, standard ITF court
+dimensions as ground truth). Least-squares fit via `cv2.findHomography`,
+verified two ways: numeric reprojection error (mean 30.6cm/max 47.9cm on
+a 23.77m court, ~1.3% relative) and a visual overlay of the fitted court
+lines back onto the frame before trusting it. Built on top: an
+opponent-relative "bisector" recovery-position stat (the real geometric
+target coaches teach — bisecting the angle of the opponent's possible
+shots — not the fixed-center approximation broadcast stats use). Caught
+and fixed two real bugs by checking output, not just trusting it: (a) 2
+frames placed a tracked player on the wrong side of the net (geometrically
+impossible — a spurious detection, likely a ball kid/line judge, won
+"top-2 by confidence"); (b) a residual jitter problem where the far
+player's position spiked ~4m within one frame (physically impossible at
+30fps) from the same root cause — fixed with a max-plausible-sprint-speed
+continuity gate. Final numbers came from 82 clean frames after both
+filters.
+
+**2. Live-feasibility test — a real negative result about when throughput
+matters** (`scripts/live_feasibility.py`). Tested whether real-time
+single-court tennis tracking genuinely needs mv-tracking's speedup on this
+hardware, by reusing `eval/run.py`'s own timed pipeline functions against
+a real tennis clip and checking wall-clock processing time against the
+clip's own real-time duration. Result: baseline (full decode+detect every
+frame) finishes 1804 frames in 46.0s vs. the clip's 60.1s real duration —
+**it already keeps up live**, no speedup needed. This contradicted the
+predicted outcome (baseline's ~20.8fps MOT17 average suggested it
+couldn't); root cause is that MOT17's crowded pedestrian street scenes are
+a much heavier per-frame inference load than a 2-person tennis frame at
+1280x720 — the earlier prediction was extrapolating from the wrong
+reference scene. Reported as a real finding rather than reframed to fit
+the original throughput narrative. Redirected the "genuinely needs
+throughput" case toward multi-stream concurrency (many simultaneous
+cameras on one machine) instead of single-stream real-time, which is
+where this project's actual measured advantage (`findings.md` #6) lives.
+
+**3. Marathon checkpoint re-identification — real data, honest negative
+result** (`scripts/checkpoint_reid.py`). Goal: recognize the same runner
+across two different checkpoint cameras via appearance (reusing
+`ReIDEmbedder`/OSNet from `findings.md` #13). Real footage sourcing was
+its own saga: of ~8 candidate videos found via targeted YouTube search
+(mirroring the phrasing pattern "[event] starting/finish line camera,"
+which reliably found genuine fixed cameras vs. everything else), most
+failed for real, verifiable reasons — two were mislabeled participant POV
+vlogs (chest-cam/selfie, despite titles saying "finish funnel"), one was a
+moving lead-vehicle chase camera, one was too crowded/wrong-angle
+(rejected by the user directly on inspection). Landed on two real fixed
+cameras from the *same* event (OKC Memorial Marathon 2026-04-26, start +
+finish line, same uploader) — first genuine same-race pair after the
+earlier two-different-races pass (used only as a negative control, since
+zero true matches are possible by construction there).
+
+Ran the real pipeline (per-clip ByteTrack + OSNet embeddings, averaged
+per track) on the true same-race pair and got a result that looked
+promising (mean cross-clip cosine similarity 0.505, close to the ~0.511
+same-identity ballpark from MOT17) — but **visual inspection of the
+actual top-10 highest-scoring crop pairs found zero convincing matches**.
+The single highest score (0.842) was clearly different people (mismatched
+outfit colors); several others were the *same* one red-outfit finish-line
+runner matched against three different red-outfit start-line runners —
+a textbook clothing-color false positive, not identity. Conclusion,
+reported honestly rather than spun: appearance-based re-id, as built and
+validated on MOT17-scale/domain crops, does not hold up on small/distant
+elevated race-camera crops with homogeneous athletic clothing, even with
+genuine same-event ground truth. Real bib numbers were checked as the
+obvious alternative signal and ruled out directly (confirmed illegible in
+the actual footage on inspection) rather than assumed to work.
+
+**4. PULSE — plaza pedestrian dwell/lingering detection**
+(`scripts/plaza_dwell.py`), the live thread. Concept: automate William
+Whyte's "Social Life of Small Urban Spaces" methodology (where do people
+actually stop and linger, not just walk through) — real academic
+precedent found directly (a 2025/2026 PNAS paper doing an AI version of
+the same 1980s research on the same NYC plazas). First candidate site
+(Times Square, two EarthCam angles) failed hard: default YOLOv8s settings
+gave **zero detections** on a visibly crowd-packed frame, because
+elevated tourist-plaza cameras put people at ~15-30px native — below the
+detector's effective floor at the default 640 inference resolution.
+Tuning (`imgsz=1920`, `conf=0.1`) partially recovered signal (36-63
+detections vs. an estimated 150+ visible people) but the recovery was
+worst exactly in the densest, most socially-interesting clusters
+(occlusion-heavy crowds at the TKTS steps) — the user correctly called
+this out as an unreliable measurement, not a real fix, and it was dropped
+rather than defended. Bryant Park (lower angle, moderate density) worked
+cleanly with *no* threshold tuning (5 detections ≈ 5-8 actually-visible
+people) and produced a real, visually-verified Whyte-style finding (a
+genuine 3-person dwell cluster near a merch tent, correctly separated
+from ~100 passers-through). Also caught and fixed a real false-positive
+bug at Times Square scale: dropping confidence to 0.1 let static objects
+(non-moving, radius=0px across 90+ frames — physically impossible for a
+live human, who always shows some postural sway) flicker in and out of
+detection and register as false "dwellers"; fixed with a minimum-jitter
+floor alongside the existing max-radius dwell classifier.
+
+**Current step**: hunting for a second Bryant-Park-quality camera angle
+for the actual multi-camera payoff (ground-plane fusion across genuinely
+overlapping views) repeatedly failed — live plaza webcams with both good
+lighting/angle *and* a second simultaneous angle of the *same* physical
+space turned out to be rare (tried and rejected: Cleveland Public Square
+x2 too dark/skyline-only, Coney Island too far/dark, Nashville Broadway
+too far, Washington Square Park not live, Amsterdam Beursplein wrong
+top-down angle + literal PTZ camera that can't hold a fixed calibration).
+Pivoted to **WildTrack** (EPFL) instead of continuing to hunt live
+webcams: a purpose-built academic dataset, 7 synchronized/calibrated
+cameras with genuine overlapping coverage of one public square, free,
+no registration, ground-truth annotations included. Downloading now
+(6.8GB, `data/wildtrack/`) — EPFL's server drops the connection every few
+minutes under sustained transfer (`curl: (56) Recv failure`), so the
+fetch runs as a self-resuming retry loop rather than a single `curl`
+call.
+
 ## Working conventions
 
 - This is exploratory systems/research code, not a product — favor fast

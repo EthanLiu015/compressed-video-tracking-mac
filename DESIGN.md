@@ -595,3 +595,20 @@ These recur through every section above and are deliberate policy:
   streams-per-watt comparison the plan called for is unmeasured.
 - **CorrectionNet revisit conditions**: appearance features or a confidence
   gate, if returned to at all.
+
+---
+
+## 13. Downstream applications (out of scope for this document)
+
+Everything above is the core tracker's design. A separate exploration pass
+built real applications on top of it — tennis court homography and a
+recovery-position analytics stat, a real negative result on when
+throughput actually matters for real-time use, cross-checkpoint appearance
+re-identification on real marathon footage (a numerically-plausible result
+that visual inspection showed was a false positive — `findings.md` #16),
+and pedestrian dwell/lingering detection with a real detector-floor
+finding on extreme-elevation crowd cameras (`findings.md` #17). None of
+this changes the core tracker's design or its MOT17 numbers above; full
+narrative lives in `.claude/CLAUDE.md`'s "Applications built on the core
+tracker" section, not here, to keep this document's scope to the system
+this file is named for.

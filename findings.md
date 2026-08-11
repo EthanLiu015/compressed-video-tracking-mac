@@ -647,6 +647,87 @@ carrying the pre-fix fps numbers (38.5/44.2) forward with a flag rather
 than overwriting them, and recommending a clean re-measurement in a
 fresh/idle session before revising them either way.
 
+## 16. Appearance ReID (OSNet/MSMT17) fails to transfer to small/distant out-of-domain crops — negative result on real cross-checkpoint data
+
+**What**: tested whether `ReIDEmbedder` (the same OSNet/MSMT17 model that
+gave a real HOTA/IDF1 win on MOT17, #13) could re-identify the same person
+across two different fixed cameras — a genuinely different task from
+MOT17's single-camera re-association, and the first time this component
+was tested outside MOT17's domain. Sourced real same-event footage (OKC
+Memorial Marathon 2026-04-26, start + finish line camera, same uploader,
+confirmed same day) after an earlier different-races pair (used only as a
+negative control — zero true matches possible by construction, useful for
+checking the matcher doesn't hallucinate). Per-clip ByteTrack tracking,
+OSNet embeddings averaged over up to 5 sampled crops per track, cosine
+similarity across all cross-clip track pairs.
+
+**Metric impact**: mean cross-clip similarity 0.505 (close to MOT17's
+~0.511 same-identity ballpark), max 0.842, 14,005 of 310,464 pairs scored
+above the 0.5 "same-identity" threshold from #13's MOT17 calibration.
+
+**Read — the numeric result looked promising and was wrong.** Visual
+inspection of the actual top-10 highest-scoring crop pairs (not just the
+similarity number) found zero convincing matches: the single highest
+score (0.842) was clearly two different people (mismatched outfit
+colors); several others were the *same* one red-outfit finish-line runner
+matched against three *different* red-outfit start-line runners — a
+clothing-color false positive, not identity. This is the same category of
+mistake the project's own convention exists to catch (verify before
+trusting a metric that looks good) — the numeric similarity alone would
+have been reported as a plausible partial win if the crops hadn't been
+checked by eye. Root cause: small (~30-50px), distant, motion-blurred
+race-camera crops with homogeneous athletic clothing are a different
+regime than MOT17's crops (which is what #13's 0.511/0.428 calibration
+was measured on) — the embedding space doesn't have the same
+same-vs-different separation on this domain. Bib-number OCR was
+considered as the obvious alternative signal (bibs exist precisely to
+solve identity) and directly ruled out by checking the actual footage:
+bib numbers are illegible at this camera resolution, not assumed to work
+without checking.
+
+## 17. Default YOLO settings fail catastrophically on extreme-elevation crowd cameras — real detector-floor finding
+
+**What**: pointed the existing person-detection pipeline at real live
+public-plaza webcam footage (Times Square, two EarthCam angles) as a new
+deployment domain, outside anything the project had tested before
+(MOT17's street-level pedestrian scale, or the closer/lower-angle tennis
+and marathon footage used elsewhere this session).
+
+**Metric impact** (single frame, visibly crowded with 150+ people):
+
+| Setting | Detections |
+|---|---|
+| YOLOv8s, default (imgsz 640, conf 0.25) | 0 |
+| YOLOv8s, imgsz 1920 | 1 |
+| YOLOv8s, tiled into quadrants (imgsz 640 each) | 2 |
+| YOLOv8m, imgsz 1280, conf 0.25 | 2 |
+| YOLOv8m, imgsz 1280, conf 0.1 | 14 |
+| YOLOv8s, imgsz 1920, conf 0.1 (daytime frame, sparser crowd) | 36-63 |
+
+**Read**: default settings (0 detections) aren't a marginal miss, they're
+a total failure — this camera type puts people at ~15-30px native
+resolution, and the default 640 inference resize shrinks that below the
+detector's effective floor entirely. Resolution alone doesn't fix it
+either (imgsz 1920 recovered exactly 1 detection on the crowded
+night frame); the real lever was the combination of much higher
+resolution *and* a much lower confidence threshold, and even then
+recovery was worst exactly in the densest, most-occluded clusters —
+undercounting hardest precisely where a downstream metric (e.g. dwell/
+lingering detection, see CLAUDE.md's PULSE section) most needs accurate
+counts. Confirmed this is a real camera-type problem, not a one-frame
+fluke, by testing a second EarthCam angle and both day/night conditions.
+Also surfaced a secondary bug at the tuned low-confidence setting: static
+objects (non-moving, exact-zero position jitter across 90+ frames —
+physically impossible for a live human) flickered in and out of detection
+and were miscounted as long-duration "dwellers"; fixed with a
+minimum-jitter floor. **Conclusion reached and accepted rather than
+patched further**: extreme-elevation/high-density tourist-plaza cameras
+are outside this detector's reliable operating envelope even after
+tuning, and the honest fix is choosing a better-matched camera (lower
+angle, moderate density — verified directly: an alternate site, Bryant
+Park, matched near-1:1 against visually-counted people with zero
+threshold tuning), not continuing to force settings on a mismatched one.
+
 ## Summary: what actually worked vs. didn't
 
 - **Worked, real and reproducible**: MV propagation for throughput (at a
@@ -711,3 +792,21 @@ fresh/idle session before revising them either way.
   silently absorbed a confounded in-session fps re-measurement (system
   load avg 22 at measurement time) instead of overwriting the previously
   clean fps numbers with contaminated ones.
+- **Didn't work outside MOT17's domain, caught by checking output not just
+  the metric** (#16): appearance ReID re-tested on real cross-checkpoint
+  marathon footage (genuine same-event ground truth, not a synthetic or
+  mismatched-domain check) scored numerically plausible (mean similarity
+  near MOT17's same-identity ballpark) but visual inspection of the actual
+  top-scoring crop pairs found the matches were driven by clothing-color
+  coincidence, not identity — zero convincing true matches. A reminder
+  that a metric matching a prior calibration isn't the same as the metric
+  being right on a new domain.
+- **Real detector-floor finding, not a bug** (#17): default YOLO settings
+  produced zero detections on a visibly crowd-packed extreme-elevation
+  plaza camera (people at ~15-30px native, below the default 640-resize
+  floor). Higher resolution + lower confidence partially recovered signal
+  but stayed worst exactly where it mattered most (dense, occluded
+  clusters) — accepted as a real camera-type mismatch and resolved by
+  picking a better-suited site (confirmed near-1:1 detection accuracy
+  there with no tuning) rather than continuing to force settings on a
+  fundamentally mismatched one.
