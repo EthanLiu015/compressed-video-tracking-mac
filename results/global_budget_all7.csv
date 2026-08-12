@@ -1,0 +1,4 @@
+scenario,condition,budget_ceiling,total_anchor_calls,HOTA,MOTA
+all7,independent,832,832,35.989,33.095
+all7,naive-shared,499,499,28.111,22.373
+all7,global,499,499,27.569,22.301

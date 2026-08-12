@@ -226,11 +226,79 @@ def run_mv_learned(
     return frames, dt
 
 
+def run_mv_replay(
+    video: pathlib.Path,
+    out_txt: pathlib.Path,
+    anchor_frames: set,
+    weights: str = "yolov8s.pt",
+    use_reid: bool = False,
+    tracker_kwargs: dict | None = None,
+    **_kwargs,
+) -> tuple[int, float]:
+    """Anchor timing comes from a precomputed frame-index set (built by
+    `mvtrack.sched.global_replay`'s independent/global allocation
+    simulators) instead of a live interval/scheduler decision -- lets the
+    global-scheduler experiment's two allocation strategies be scored
+    through this exact same TrackEval-backed path with no new scoring
+    plumbing. `anchor_frames` uses `FrameMV.index` (0-based), matching how
+    `extract_urgency_trace` builds its trace.
+
+    `anchor_frames` has no default and isn't driven by `main()`'s generic
+    `--pipeline` CLI loop (it's a per-video precomputed set, not a CLI
+    scalar) -- call this directly from a driver script, e.g.
+    `scripts/run_global_budget_experiment.py`. Registered in `PIPELINES`
+    anyway so `evaluate()`'s TrackEval scoring path treats it like any
+    other pipeline.
+    """
+    from mvtrack.detect import Detector, pick_device
+    from mvtrack.extract import iter_frames_with_mvs
+    from mvtrack.track import MVTracker
+
+    detector = Detector(weights)
+    # max_age must cover the largest real gap this SPECIFIC anchor_frames
+    # set actually has, or a track that hasn't hit its next anchor yet gets
+    # pruned as a false ghost -- findings.md #15, same invariant
+    # run_mv_fixed/run_mv_adaptive rely on, derived here from the concrete
+    # anchor set rather than a scheduler parameter.
+    sorted_anchors = sorted(anchor_frames)
+    gaps = [b - a for a, b in zip(sorted_anchors, sorted_anchors[1:])]
+    default_max_age = max(gaps) if gaps else 1
+    kwargs = {"max_age": default_max_age, **(tracker_kwargs or {})}
+    tracker = MVTracker(use_appearance=use_reid, **kwargs)
+    reid = None
+    if use_reid:
+        from mvtrack.track.reid import ReIDEmbedder
+        reid = ReIDEmbedder(device=pick_device())
+    rows = []
+    frames = 0
+    t0 = time.perf_counter()
+    for fmv, frame in iter_frames_with_mvs(str(video)):
+        frames += 1
+        if fmv.index in anchor_frames:
+            img = frame.to_ndarray(format="bgr24")
+            boxes, scores, cls_ids = detector(img)
+            keep = cls_ids == PERSON_CLS
+            embs = reid(img, boxes[keep]) if reid is not None else None
+            tracks = tracker.step_anchor(boxes[keep], scores[keep], embeddings=embs)
+        else:
+            tracks = tracker.step_propagate(fmv)
+        for tr in tracks:
+            x0, y0, x1, y1 = tr.box
+            rows.append(
+                f"{frames},{tr.id},{x0:.2f},{y0:.2f},{x1 - x0:.2f},{y1 - y0:.2f},{tr.score:.3f},-1,-1,-1"
+            )
+    dt = time.perf_counter() - t0
+    out_txt.parent.mkdir(parents=True, exist_ok=True)
+    out_txt.write_text("\n".join(rows) + "\n")
+    return frames, dt
+
+
 PIPELINES = {
     "baseline": run_baseline,
     "mv-fixed": run_mv_fixed,
     "mv-adaptive": run_mv_adaptive,
     "mv-learned": run_mv_learned,
+    "mv-global-replay": run_mv_replay,
 }
 
 
