@@ -728,6 +728,112 @@ angle, moderate density — verified directly: an alternate site, Bryant
 Park, matched near-1:1 against visually-counted people with zero
 threshold tuning), not continuing to force settings on a mismatched one.
 
+## 18. Global cross-stream compute-budget scheduler — real infrastructure, negative result on the accuracy hypothesis
+
+**What**: today, `run_multistream` (`src/mvtrack/bench/harness.py`) runs N
+concurrent camera streams as fully independent processes, each with its
+own `Adaptive` scheduler deciding anchor timing in total isolation — zero
+shared awareness that one stream might be busy while another is idle.
+Built a shared arbiter (`src/mvtrack/sched/global_budget.py`'s
+`BudgetArbiter`) that reallocates a fixed, shared detector-call budget
+across concurrent streams by real per-frame urgency (`Adaptive.urgency()`,
+the same spike-ratio signal the existing scheduler already computes
+internally), instead of every stream independently anchoring whenever it
+locally wants to. Tested via an offline trace-replay harness
+(`src/mvtrack/sched/global_replay.py`,
+`scripts/run_global_budget_experiment.py`) against real MOT17 sequences,
+scored through the project's existing TrackEval-backed `eval/run.py`
+pipeline — no live multiprocessing needed to answer the accuracy question.
+
+**Two real bugs caught before trusting any result, both by noticing a
+result was suspiciously too clean rather than assuming it was correct**:
+
+1. A first version held `total_budget` equal to what today's independent
+   scheduling already naturally uses, and defaulted `budget_per_tick` to
+   the number of streams (4). Result: `global` reproduced `independent`'s
+   per-stream anchor counts EXACTLY, frame-for-frame. Root cause: with
+   `budget_per_tick=4` and at most 4 simultaneous requests possible, every
+   tick's requests always fit — the arbiter never had to actually choose
+   between anything, and it silently degenerated into a no-op. Real fix:
+   `budget_per_tick` has no default now and must be chosen deliberately;
+   on this project's own measured detector throughput (~150-200fps),
+   `budget_per_tick=1` is the physically grounded value for "N cameras
+   sharing one real detector."
+2. Fixing bug 1 exposed the deeper problem: holding `total_budget` equal
+   to independent's own natural total isn't genuine scarcity on this
+   hardware at all — a single shared detector has enough real throughput
+   headroom that nothing was actually resource-constrained, so there was
+   nothing real to reallocate. Fixed by imposing a genuine cut (60% of
+   independent's natural total) and adding a fair baseline,
+   `simulate_naive_shared_allocation` — identical real per-tick contention
+   mechanism as `global`, but with the urgency signal removed, isolating
+   exactly what that signal buys. Its own first version assigned every
+   request a flat `urgency=0.0`; `BudgetArbiter.decide` ranks with
+   Python's *stable* `sorted()`, so an all-tied list silently preserved
+   dict-iteration order — always favoring stream 0, a deterministic bias,
+   not genuine "no signal" behavior (caught via a synthetic 3-equal-stream
+   test that gave one stream 100% of the budget under both conditions,
+   which should never coincide once real urgency differs). Fixed with an
+   independently-seeded random tie-break instead of a shared constant.
+
+**Real result, at genuine 60%-of-natural scarcity, two independent
+stream-count conditions**:
+
+| Streams | Condition | Calls | HOTA | MOTA |
+|---|---|---|---|---|
+| 4 (MOT17-04+02 dense, 05+11 sparse) | independent (unconstrained) | 530 | 37.59 | 33.52 |
+| 4 | naive-shared (real scarcity, no urgency signal) | 318 | 27.94 | 21.46 |
+| 4 | **global** (real scarcity, urgency-aware) | 318 | 27.76 | 21.70 |
+| 4 (MOT17-09+10+11+13, even density) | independent | 433 | 35.71 | 36.15 |
+| 4 | naive-shared | 260 | 28.31 | 24.67 |
+| 4 | **global** | 260 | 28.56 | 24.68 |
+| 7 (all MOT17-FRCNN sequences) | independent | 832 | 35.99 | 33.10 |
+| 7 | naive-shared | 499 | 28.11 | 22.37 |
+| 7 | **global** | 499 | **27.57** | **22.30** |
+
+Global vs. naive-shared at equal real budget: a wash at 4 streams (HOTA
+-0.18/+0.26 across the two density scenarios, MOTA +0.24/+0.01 — all
+within noise), and **worse** at 7 streams (HOTA -0.54, MOTA -0.07) despite
+real per-tick contention rising from ~9-10% of ticks (4 streams) to
+~15.4% (7 streams) — ruling out "not enough streams" as the explanation,
+since more contention made the result slightly worse, not better.
+
+**Root cause, investigated rather than left as an unexplained null**: a
+direct tick-by-tick contention profile (no detector calls needed --
+purely from the precomputed urgency trace) showed that even at 7 streams,
+56.6-69.1% of ticks have ZERO eligible streams and another 20.6-28.0% have
+exactly ONE — genuine multi-stream contention (2+ streams simultaneously
+wanting an anchor, the only situation where urgency-based ranking can
+matter at all) occurs in only 9.1-15.4% of ticks. In the remaining ~85-91%
+there's either nothing to decide or no real choice to make, so the
+signal's aggregate leverage over a full sequence is small by construction.
+Considered and rejected trying a different (correlated-multi-camera, e.g.
+EPFL-RLC/CAVIAR) dataset next: those only have 2-3 usable concurrent
+streams (fewer than the 7-stream test that already made things worse) and
+would run under `Adaptive` defaults tuned specifically against MOT17 in an
+earlier pass (#11) at a very different real fps, adding a confound that
+would make a positive result there hard to attribute cleanly to the
+original hypothesis. Two independent, mechanistically-explained
+replications (4-stream, 7-stream) was judged sufficient to stop rather
+than keep dataset-shopping for a friendlier result — the same discipline
+already applied to CorrectionNet (#4-5), per-edge scale correction (#12),
+and appearance ReID on marathon footage (#16).
+
+**Bottom line**: the infrastructure is real and independently verified —
+`BudgetArbiter`'s policy logic (`tests/test_budget_arbiter.py`, 6 tests),
+the trace-replay mechanism (verified to reproduce a real live
+`Adaptive.should_anchor` run frame-for-frame on MOT17-02 before trusting
+it for anything), and real `multiprocessing.Queue` IPC throughput
+(79,756 msgs/sec / 32 bytes per message measured directly, 399x headroom
+over the real 8-stream-at-25fps target, confirming the score-only design
+never needs to ship frame pixels between processes). What doesn't hold up
+is the specific accuracy hypothesis it was built to test: urgency-aware
+cross-stream reallocation, using this signal, does not measurably beat
+naive/uninformed sharing under genuine scarcity on real MOT17 data, at
+either 4 or 7 concurrent streams. The signal that works well for
+within-stream anchor timing (already validated and shipped, #10-11)
+doesn't demonstrably transfer to cross-stream prioritization value.
+
 ## Summary: what actually worked vs. didn't
 
 - **Worked, real and reproducible**: MV propagation for throughput (at a
@@ -810,3 +916,19 @@ threshold tuning), not continuing to force settings on a mismatched one.
   picking a better-suited site (confirmed near-1:1 detection accuracy
   there with no tuning) rather than continuing to force settings on a
   fundamentally mismatched one.
+- **Real infrastructure, negative result on the accuracy hypothesis**
+  (#18): a global cross-stream compute-budget scheduler (`BudgetArbiter`,
+  urgency-aware reallocation across concurrent camera streams) was fully
+  built and independently verified — real IPC throughput measured (not
+  estimated), real trace-replay mechanism verified frame-for-frame against
+  a live scheduler run, two real bugs caught before trusting any result
+  (a too-loose default that made the arbiter a silent no-op, and a flat
+  urgency tie-break that collapsed to deterministic stream-id favoritism).
+  But at genuine 60%-of-natural scarcity on real MOT17 data, urgency-aware
+  reallocation didn't beat a fair naive-sharing baseline at either 4 or 7
+  concurrent streams — a wash at 4, slightly worse at 7. Root-caused
+  (real multi-stream contention only occurs in 9-15% of ticks; the signal
+  that works for within-stream anchor timing doesn't obviously transfer to
+  cross-stream ranking) rather than left as an unexplained null, and
+  accepted as the honest result rather than dataset-shopping for a
+  friendlier outcome.
