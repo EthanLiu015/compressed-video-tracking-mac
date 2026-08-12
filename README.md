@@ -105,15 +105,22 @@ the full before/after story.
 
 ```
 src/mvtrack/
-  extract/   # bitstream -> motion-vector grids (PyAV)
-  detect/    # YOLO wrapper (PyTorch MPS)
-  track/     # MVTracker (IoU/Hungarian + MV propagation), CorrectionNet
-  sched/     # FixedInterval and Adaptive anchor schedulers
-  bench/     # multi-stream throughput harness
-  mot_gt.py  # shared MOT17 ground-truth loader
-eval/run.py  # MOT17 scoring harness (HOTA/CLEAR/Identity via TrackEval)
-scripts/     # data prep, dataset builders, training, benchmarking, plots
-results/     # committed CSVs + plots (reproducible, unlike gitignored outputs/)
+  extract/    # bitstream -> motion-vector grids (PyAV)
+  detect/     # YOLO wrapper (PyTorch MPS)
+  track/      # MVTracker (IoU/Hungarian + MV propagation), CorrectionNet,
+              # WorldTracker (fused ground-plane tracking for PULSE)
+  sched/      # FixedInterval/Adaptive anchor schedulers, BudgetArbiter
+              # (global cross-stream scheduler) + offline trace-replay
+  court/      # camera calibration + general N-camera registration
+  analytics/  # PULSE metrics: dwell, capture rate, MV-energy, approach
+              # dynamics, group dwell, loitering/abandoned-object
+  bench/      # multi-stream throughput harness
+  mot_gt.py   # shared MOT17 ground-truth loader
+eval/run.py   # MOT17 scoring harness (HOTA/CLEAR/Identity via TrackEval)
+scripts/      # data prep, dataset builders, training, benchmarking, plots,
+              # per-dataset PULSE fusion scripts, global-scheduler experiment
+tests/        # synthetic correctness checks for new logic components
+results/      # committed CSVs + plots (reproducible, unlike gitignored outputs/)
 ```
 
 ## Setup
@@ -175,12 +182,72 @@ python scripts/make_plots.py              # regenerates results/plots/*.png from
 ## Applications
 
 Real downstream uses built on top of the tracker above, each with its own
-honest result (including two real negative findings) — full narrative in
-`.claude/CLAUDE.md`'s "Applications built on the core tracker" section:
+honest result — full narrative in `.claude/CLAUDE.md` and `handoff.md`:
 
 ```bash
 python scripts/court_positioning.py       # tennis: real-world court homography + recovery-position stat
 python scripts/live_feasibility.py        # does real-time tracking actually need mv-tracking's speedup?
 python scripts/checkpoint_reid.py         # cross-checkpoint appearance re-id (negative result, findings.md #16)
-python scripts/plaza_dwell.py             # pedestrian dwell/lingering detection, "PULSE" (findings.md #17)
+python scripts/plaza_dwell.py             # single-camera dwell/lingering detection, "PULSE" (findings.md #17)
+```
+
+### PULSE: multi-camera occupancy analytics
+
+Started as single-camera dwell detection, generalized into real
+multi-camera fusion and five metrics beyond raw dwell time, all validated
+on real third-party data (WildTrack, EPFL-RLC, EPFL CVLAB Laboratory,
+CAVIAR, ABODA) — not synthetic fixtures:
+
+- **General N-camera registration** (`mvtrack.court.multicam`): ORB+RANSAC
+  correspondence matching + Kabsch/Procrustes alignment, automatic
+  per-camera include/exclude by fit residual. Validated on three
+  structurally different real cases without any camera-count-specific
+  code — a real misaligned camera correctly excluded (EPFL-RLC), an
+  already-co-calibrated 4-camera rig correctly kept intact (EPFL Lab),
+  and two genuinely disjoint viewpoints correctly flagged as a bad fit
+  (CAVIAR shop cor/front).
+- **Five real metrics** (`mvtrack.analytics`), each a category shift from
+  "person present here how long," not a variation on it:
+  `capture_rate` (stopped/passersby conversion), `mv_energy` (zone
+  activity straight from raw motion vectors, no detector call at all),
+  `approach_dynamics` (deceleration/"window shopping," catches cases a
+  binary dwell threshold misses), `group_dwell` (real companion-pair
+  detection, visually confirmed on real footage), and `loitering`
+  (abandoned-object alerts — found and fixed a real bug along the way,
+  since a carried-then-set-down object needs its "placed" phase found,
+  not stationarity assumed from first detection).
+
+```bash
+python scripts/epfl_rlc_fusion.py         # real 60fps 3-cam fusion, general registration
+python scripts/epfl_lab_fusion.py         # 4-cam Laboratory sequence, registration validation
+python scripts/caviar_shop_fusion.py      # capture rate + companion-pair detection
+python scripts/aboda_leftbag.py           # real abandoned-object detection, visually verified
+```
+
+## Global cross-stream compute-budget scheduler
+
+`run_multistream` runs N concurrent camera streams as fully independent
+processes, each with its own `Adaptive` scheduler in total isolation — no
+shared awareness that one stream might be busy while another is idle.
+`BudgetArbiter` (`mvtrack.sched.global_budget`) reallocates a fixed
+detector-call budget across streams by real per-frame urgency instead,
+arbitrating on small numeric scores only (real IPC throughput measured at
+79,756 msgs/sec, 399x headroom over the actual 8-stream target rate — the
+design never ships frame pixels between processes).
+
+**Honest result**: after fixing two real bugs caught by results looking
+suspiciously identical between conditions (a too-loose default that made
+the arbiter a silent no-op; a flat-urgency naive baseline that collapsed
+to deterministic stream-id favoritism under a stable sort), urgency-aware
+reallocation does **not** measurably beat fair naive sharing under genuine
+scarcity on real MOT17 data, at either 4 or 7 concurrent streams —
+root-caused to real multi-stream contention occurring in only 9-15% of
+ticks, not left as an unexplained null. Full numbers and root cause in
+`findings.md` #18. The infrastructure (arbiter policy, IPC, offline
+trace-replay harness) is real and independently tested regardless; a live
+demo was deliberately not built on top of an unvalidated accuracy claim.
+
+```bash
+python scripts/run_global_budget_experiment.py   # real MOT17 replay, both scarcity scenarios
+pytest tests/                                     # or: python tests/test_*.py individually
 ```
