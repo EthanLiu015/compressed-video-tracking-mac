@@ -23,17 +23,22 @@ from matplotlib.patches import Polygon  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from epfl_rlc_fusion import (  # noqa: E402
-    DATA_ROOT, FRAME_DT, FUSION_CAMERAS, MAX_DWELL_RADIUS, MIN_DWELL_SECONDS, OUT_DIR,
-    VIDEO_ROOT, WorldTracker, filter_static_pixel_regions, filter_unstable_projections,
+    DATA_ROOT, FRAME_DT, MAX_DWELL_RADIUS, MIN_DWELL_SECONDS, OUT_DIR,
+    VIDEO_ROOT, filter_static_pixel_regions, filter_unstable_projections,
     load_calibration, load_mot_tracks, pixel_to_ground, project_and_fuse,
-    projection_sensitivity, register_to_cam0,
+    projection_sensitivity, register_all_cameras,
 )
+from mvtrack.track import WorldTracker  # noqa: E402
 
 VIZ_DIR = OUT_DIR.parent / "epfl_rlc_viz"
-CAM_COLORS = {0: "tab:blue", 2: "tab:orange"}
+_CAM_COLOR_CYCLE = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple", "tab:brown"]
 
 
-def camera_fov_footprint(cam: int, calib, n=60):
+def cam_color(cam: int) -> str:
+    return _CAM_COLOR_CYCLE[cam % len(_CAM_COLOR_CYCLE)]
+
+
+def camera_fov_footprint(cam: int, calib, registration, n=60):
     """Project this camera's image bottom rows onto the ground plane -- a
     rough visual guide to where each camera looks, not a precision data
     source. Sampling several rows near the bottom (not just the very last
@@ -49,16 +54,18 @@ def camera_fov_footprint(cam: int, calib, n=60):
     stable = sens <= 800.0  # looser than MAX_MM_PER_PX -- a visual guide, not tracked data
     with np.errstate(all="ignore"):
         world = pixel_to_ground(pts[stable], params, R, t)
-    world = register_to_cam0(cam, world)
-    return world
+    return registration.apply(world)
 
 
 def render_mesh_map():
     print("rendering top-down meshed-homography map...")
     calibs = {c: load_calibration(c) for c in range(3)}
+    registrations = register_all_cameras()
+    included_cams = [c for c, reg in registrations.items() if reg.included]
+
     per_cam_tracks = {c: load_mot_tracks(str(OUT_DIR / f"mv_fixed_cam{c}.txt")) for c in range(3)}
     per_cam_tracks = filter_static_pixel_regions(per_cam_tracks)
-    per_frame_fused = project_and_fuse(per_cam_tracks, calibs)
+    per_frame_fused = project_and_fuse(per_cam_tracks, calibs, registrations)
 
     frame_ids = sorted(per_frame_fused.keys())
     tracker = WorldTracker(max_step=2000.0, max_age=10)
@@ -68,14 +75,14 @@ def render_mesh_map():
     tracks.update({tid: tr["history"] for tid, tr in tracker.tracks.items()})
 
     fig, ax = plt.subplots(figsize=(10, 8))
-    for cam in FUSION_CAMERAS:
-        footprint = camera_fov_footprint(cam, calibs[cam]) / 1000.0
+    for cam in included_cams:
+        footprint = camera_fov_footprint(cam, calibs[cam], registrations[cam]) / 1000.0
         order = np.argsort(np.arctan2(footprint[:, 1] - footprint[:, 1].mean(),
                                        footprint[:, 0] - footprint[:, 0].mean()))
-        poly = Polygon(footprint[order], closed=True, alpha=0.15, color=CAM_COLORS[cam],
+        poly = Polygon(footprint[order], closed=True, alpha=0.15, color=cam_color(cam),
                         label=f"cam{cam} ground-plane footprint")
         ax.add_patch(poly)
-        ax.plot(footprint[:, 0], footprint[:, 1], "o", color=CAM_COLORS[cam], markersize=2)
+        ax.plot(footprint[:, 0], footprint[:, 1], "o", color=cam_color(cam), markersize=2)
 
     for tid, pts in tracks.items():
         xy = np.array([p for _, p in pts]) / 1000.0

@@ -27,19 +27,20 @@ unavailable, so validation here is two-layered:
    single-camera Tsai calibration workflows unless deliberately unified)
    -- individually correct per (1), but not mutually consistent, which is
    why raw fusion barely merged anything despite the user directly
-   confirming real overlap exists in the footage. Fixed via automatic
-   registration: ORB feature matching + RANSAC-homography-filtered
-   correspondences between cam0 and each other camera, projected through
-   each camera's own (already-validated) pixel_to_ground, then a
-   Kabsch/Procrustes rigid-transform fit aligning the point clouds. Cut
-   the raw world-frame mismatch for cam2 from ~10.2m to ~1.1-1.4m mean
-   residual -- confirmed the "independent origin" diagnosis and gives a
-   real, working registration. The same approach against cam1 failed
-   outright (57-90m residual, no consistent structure, both against cam0
-   and cam2) -- real evidence cam1 doesn't share enough true overlap with
-   the other two for this method to register it, so cam1 is excluded from
-   fusion rather than forced in with a bad transform. Fusion here runs on
-   the validated cam0+cam2 pair only.
+   confirming real overlap exists in the footage. Fixed via
+   `mvtrack.court.register_cameras` -- a general N-camera registration
+   function (ORB + RANSAC-homography correspondences, Kabsch/Procrustes
+   rigid fit, automatic include/exclude by residual), not the
+   2-camera-specific hardcoded constants this module originally shipped
+   with (see git history). `register_all_cameras()` below just wraps this
+   dataset's own per-camera projection as `mvtrack.court.CameraModel`
+   callables and calls it. On this dataset it automatically rediscovers
+   the same real conclusion manual debugging first found -- cam2 registers
+   cleanly (0.76m residual), cam1 doesn't (too few correspondences survive
+   RANSAC against either other camera) and is excluded -- which is the
+   actual proof this generalizes rather than just relabeling a fixed
+   2-camera result: nothing here names cam1 or cam2 specifically, or
+   assumes exactly 3 cameras.
 """
 
 import glob
@@ -49,11 +50,12 @@ import xml.etree.ElementTree as ET
 
 import cv2
 import numpy as np
-from scipy.optimize import linear_sum_assignment
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "eval"))
 import run as eval_run  # noqa: E402
+from mvtrack.analytics import DwellParams  # noqa: E402
+from mvtrack.analytics import track_and_classify_dwells as track_and_classify_dwells_shared  # noqa: E402
 
 DATA_ROOT = REPO_ROOT / "data" / "epfl_rlc" / "EPFL-RLC_dataset"
 CALIB_ROOT = DATA_ROOT / "calibration"
@@ -175,26 +177,55 @@ def filter_unstable_projections(px: np.ndarray, params: dict, R: np.ndarray, t: 
     return sens <= MAX_MM_PER_PX
 
 
-# Registers cam2's world frame onto cam0's (the reference frame). Fitted via
-# ORB feature matching between cam0/cam2 at a shared real timestamp
-# (RLCAFTCONF-C{0,2}_100050), RANSAC-homography-filtered to 12 inlier
-# correspondences, then a Kabsch/Procrustes rigid fit -- see module
-# docstring. cam1 has no entry: registration against it failed for real,
-# checked reasons (see docstring), so it's excluded from fusion rather than
-# forced in.
-CAM2_REGISTER_D = np.array([[0.8993702893949592, -0.437187697166363],
-                             [0.4371876971663633, 0.8993702893949592]])
-CAM2_REGISTER_C0 = np.array([1931.5769154205411, 13255.355176915822])
-CAM2_REGISTER_C2 = np.array([12058.246706040183, 12214.305431100142])
-FUSION_CAMERAS = [0, 2]  # cam1 excluded -- see module docstring
+# Real timestamp shared across all 3 cameras, used once to auto-register
+# them -- any synchronized frame with real overlapping content works, this
+# one is just what was already extracted during the earlier debugging pass.
+SHARED_REGISTRATION_FRAME = "100050"
+REFERENCE_CAM = 0
 
 
-def register_to_cam0(cam: int, world_pts: np.ndarray) -> np.ndarray:
-    if cam == 0:
-        return world_pts
-    if cam == 2:
-        return (world_pts - CAM2_REGISTER_C2) @ CAM2_REGISTER_D.T + CAM2_REGISTER_C0
-    raise ValueError(f"no registration fitted for cam{cam} -- excluded from fusion")
+def make_camera_model(cam: int):
+    """Wraps this camera's Tsai projection (+ its own stability filter) as
+    a plain `mvtrack.court.CameraModel` callable -- one row of world coords
+    (or NaN, for a rejected point) per input pixel point, in order, which
+    is the contract `register_cameras` needs to keep ORB correspondence
+    pairs aligned across two cameras' independent filtering."""
+    params, R, t = load_calibration(cam)
+
+    def model(px: np.ndarray) -> np.ndarray:
+        out = np.full((len(px), 2), np.nan)
+        stable = filter_unstable_projections(px, params, R, t)
+        if stable.any():
+            with np.errstate(all="ignore"):
+                out[stable] = pixel_to_ground(px[stable], params, R, t)
+        return out
+
+    return model
+
+
+def register_all_cameras(cams=(0, 1, 2)):
+    """Real, automatic per-camera registration via
+    `mvtrack.court.register_cameras` -- replaces the hardcoded 2-camera
+    constants this function used to be (see git history): whichever
+    cameras register within `max_residual_m` are kept, the rest are
+    dropped, with no camera count or index baked in. On this dataset it
+    independently rediscovers the same real conclusion the earlier manual
+    debugging pass reached (cam1 fails, cam2 succeeds), which is the actual
+    proof this generalizes rather than just relabeling the same hardcoded
+    result."""
+    from mvtrack.court import register_cameras
+
+    camera_models = {c: make_camera_model(c) for c in cams}
+    shared_images = {
+        c: cv2.imread(str(DATA_ROOT / "frames" / f"cam{c}" / f"RLCAFTCONF-C{c}_{SHARED_REGISTRATION_FRAME}.jpeg"))
+        for c in cams
+    }
+    registrations = register_cameras(camera_models, REFERENCE_CAM, shared_images, max_residual_m=3.0)
+    for cam, reg in sorted(registrations.items()):
+        status = "included" if reg.included else "EXCLUDED"
+        print(f"  cam{cam}: {status} (residual={reg.residual_m:.2f}m, "
+              f"{reg.n_correspondences} correspondences)")
+    return registrations
 
 
 def validate_camera_positions():
@@ -277,16 +308,18 @@ def filter_static_pixel_regions(per_cam_tracks, max_fraction=0.5, bin_px=3):
     return filtered
 
 
-def project_and_fuse(per_cam_tracks, calibs):
+def project_and_fuse(per_cam_tracks, calibs, registrations):
     """Per synchronized frame, project every camera's tracked foot points to
-    the ground plane, register onto cam0's frame, and cluster points within
-    FUSE_RADIUS as one real person. Only FUSION_CAMERAS (cam0+cam2) --
-    cam1 excluded, registration against it failed (see module docstring)."""
-    all_frames = sorted(set().union(*[per_cam_tracks[c].keys() for c in FUSION_CAMERAS]))
+    the ground plane, register onto the reference frame via the automatic
+    per-camera fit in `registrations` (mvtrack.court.register_cameras --
+    whichever cameras were included, not a hardcoded pair), and cluster
+    points within FUSE_RADIUS as one real person."""
+    included_cams = [c for c, reg in registrations.items() if reg.included]
+    all_frames = sorted(set().union(*[per_cam_tracks[c].keys() for c in included_cams]))
     per_frame_fused = {}
     for frame in all_frames:
         cam_points = []
-        for cam in FUSION_CAMERAS:
+        for cam in included_cams:
             boxes = per_cam_tracks[cam].get(frame, [])
             if not boxes:
                 continue
@@ -297,7 +330,7 @@ def project_and_fuse(per_cam_tracks, calibs):
             if not stable.any():
                 continue
             world = pixel_to_ground(foot[stable], params, R, t)
-            world = register_to_cam0(cam, world)
+            world = registrations[cam].apply(world)
             cam_points.append(world)
         pts = np.concatenate(cam_points, axis=0) if cam_points else np.zeros((0, 2))
         per_frame_fused[frame] = fuse_points(pts)
@@ -319,132 +352,30 @@ def fuse_points(points: np.ndarray, radius=FUSE_RADIUS) -> np.ndarray:
     return np.array(fused)
 
 
-class WorldTracker:
-    """Hungarian-assignment world-point tracker with a grace period --
-    ports the same fix MVTracker's three-stage re-association made for
-    pixel-space MOT17 tracking (findings.md #10) to fused world-space
-    points. The bug this fixes is structurally identical: the original
-    greedy nearest-neighbor tracker dropped a track the instant it went
-    unmatched for even one frame, so any single missed detection (a brief
-    fusion-clustering miss, a detector blink) permanently killed the
-    identity and forced a respawn -- the exact "any miss fragments the
-    track" failure MVTracker's docstring describes for the pixel case.
-    Here: unmatched tracks survive up to `max_age` frames before being
-    pruned, giving a real chance to reattach if the person reappears
-    nearby -- and matching uses Hungarian assignment (globally optimal)
-    instead of greedy first-come-first-served.
-
-    Real bug found and fixed by checking cam0's raw MVTracker output
-    directly: its own per-camera tracks run up to 17.5s continuously (the
-    per-camera tracker is fine), but re-deriving identity from scratch on
-    fused world points was fragmenting everything to under 3.15s max.
-
-    Two real, distinct causes, found by isolating cam0 alone (no fusion)
-    and sweeping parameters directly rather than guessing:
-
-    1. `max_step=250mm` (a naive "real walking speed / 60fps" estimate)
-       was simply too tight -- it didn't account for how much ordinary
-       ~1-2px detector-box jitter gets amplified by ground-plane
-       back-projection even outside the extreme grazing-ray cases below.
-       This was the dominant lever: sweeping max_step alone (500mm ->
-       21.33s max duration at 5000mm) recovered continuity close to or
-       exceeding cam0's own raw per-camera track lengths, while adding
-       velocity prediction or the sensitivity filter alone barely moved
-       the number (stayed 3.7-5.0s) -- confirmed by testing each fix in
-       isolation before combining them, not assuming either worked from
-       its own plausibility.
-    2. Held-frozen unmatched tracks compound the problem for a moving
-       target once a gap does occur (the real person moves away from the
-       frozen position every subsequent frame, so the gap only grows) --
-       fixed with constant-velocity prediction during the grace period,
-       the same fix MV-propagation itself makes for the pixel case, one
-       level up in world-space.
-    """
-
-    def __init__(self, max_step=2000.0, max_age=10, vel_ema=0.6):
-        self.max_step = max_step
-        self.max_age = max_age
-        self.vel_ema = vel_ema
-        self.tracks = {}  # tid -> {"pos", "vel", "since_detection", "history"}
-        self.completed = {}  # tid -> history, moved here on prune so it isn't lost
-        self._next_tid = 0
-
-    def step(self, frame_id, points: np.ndarray):
-        track_ids = list(self.tracks.keys())
-        matched_tracks, matched_pts = set(), set()
-
-        # Predict forward before matching: a track sitting idle at its last
-        # observed position (since_detection==0 this call) uses that
-        # position as-is; one already in its grace period extrapolates
-        # along its last known velocity instead of staying frozen.
-        pred_pos = {
-            tid: tr["pos"] + tr["vel"] * tr["since_detection"] for tid, tr in self.tracks.items()
-        }
-
-        if track_ids and len(points):
-            track_pos = np.array([pred_pos[t] for t in track_ids])
-            dists = np.linalg.norm(track_pos[:, None, :] - points[None, :, :], axis=2)
-            row, col = linear_sum_assignment(dists)
-            for r, c in zip(row, col):
-                if dists[r, c] > self.max_step:
-                    continue
-                tid = track_ids[r]
-                new_vel = points[c] - self.tracks[tid]["pos"]
-                self.tracks[tid]["vel"] = (
-                    self.vel_ema * self.tracks[tid]["vel"] + (1 - self.vel_ema) * new_vel
-                )
-                self.tracks[tid]["pos"] = points[c]
-                self.tracks[tid]["since_detection"] = 0
-                self.tracks[tid]["history"].append((frame_id, points[c]))
-                matched_tracks.add(tid)
-                matched_pts.add(c)
-
-        for tid in track_ids:
-            if tid not in matched_tracks:
-                self.tracks[tid]["since_detection"] += 1
-        for tid in [t for t, tr in self.tracks.items() if tr["since_detection"] > self.max_age]:
-            self.completed[tid] = self.tracks.pop(tid)["history"]
-
-        for c in range(len(points)):
-            if c not in matched_pts:
-                self.tracks[self._next_tid] = {
-                    "pos": points[c], "vel": np.zeros(2), "since_detection": 0,
-                    "history": [(frame_id, points[c])],
-                }
-                self._next_tid += 1
+_DWELL_PARAMS = DwellParams(
+    frame_dt=FRAME_DT, min_dwell_seconds=MIN_DWELL_SECONDS,
+    min_dwell_radius=MIN_DWELL_RADIUS, max_dwell_radius=MAX_DWELL_RADIUS,
+    max_step=2000.0, max_age=10,
+)
 
 
 def track_and_classify_dwells(per_frame_fused: dict):
-    frame_ids = sorted(per_frame_fused.keys())
-    tracker = WorldTracker(max_step=2000.0, max_age=10)
-    for fid in frame_ids:
-        tracker.step(fid, per_frame_fused[fid])
-
-    tracks = dict(tracker.completed)
-    tracks.update({tid: tr["history"] for tid, tr in tracker.tracks.items()})
-
-    dwellers = {}
-    for tid, pts in tracks.items():
-        duration_s = len(pts) * FRAME_DT
-        if duration_s < MIN_DWELL_SECONDS:
-            continue
-        xy = np.array([p for _, p in pts])
-        centroid = xy.mean(axis=0)
-        radius = np.linalg.norm(xy - centroid, axis=1).max()
-        if MIN_DWELL_RADIUS <= radius <= MAX_DWELL_RADIUS:
-            dwellers[tid] = (centroid, duration_s, radius)
-    return tracks, dwellers
+    return track_and_classify_dwells_shared(per_frame_fused, _DWELL_PARAMS)
 
 
 def main():
     validate_camera_positions()
     calibs = {cam: load_calibration(cam) for cam in range(3)}
 
+    print("registering cameras (automatic -- see mvtrack.court.register_cameras)...")
+    registrations = register_all_cameras()
+
     per_cam_tracks = run_mvtrack_per_camera(anchor_interval=5)
     print("filtering static pixel regions (fixed misclassified objects)...")
     per_cam_tracks = filter_static_pixel_regions(per_cam_tracks)
-    total_raw = sum(len(boxes) for cam_tracks in per_cam_tracks.values() for boxes in cam_tracks.values())
-    per_frame_fused = project_and_fuse(per_cam_tracks, calibs)
+    included_cams = [c for c, reg in registrations.items() if reg.included]
+    total_raw = sum(len(boxes) for c in included_cams for boxes in per_cam_tracks[c].values())
+    per_frame_fused = project_and_fuse(per_cam_tracks, calibs, registrations)
 
     total_fused = sum(len(p) for p in per_frame_fused.values())
     print(f"\ntotal raw per-camera detections: {total_raw}, fused to {total_fused} "
